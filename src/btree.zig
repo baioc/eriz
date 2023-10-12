@@ -1,4 +1,4 @@
-// TODO: top-level //! docs
+//! TODO: top-level docs
 
 const std = @import("std");
 const math = std.math;
@@ -10,59 +10,78 @@ const assert = std.debug.assert;
 /// Static parameters used to generate a custom B-tree.
 pub const Config = struct {
     /// Type of elements being stored in the tree.
+    ///
+    /// If a custom struct is used here, it must be either an `extern struct` or
+    /// an ABI-sized `packed struct`.
     Element: type,
 
     /// Whether to use a binary search inside each node. Leave `null` in order
     /// to have the implementation choose based on the max number of elements per node.
     use_binary_search: ?bool = null,
 
-    /// Number of elements in a full node. Leave `null` in order to have the implementation
-    /// choose a default based on either `desired_node_bytes` or `@sizeOf(Element)`.
-    slots_per_node: ?usize = null, // TODO: test
+    /// Desired number of elements in a full node. Leave `null` in order to have the implementation
+    /// choose a default based on either `bytes_per_node` or `@sizeOf(Element)`.
+    slots_per_node: ?usize = null,
 
-    /// Ensures every allocation (i.e., node) fits inside a block of this many bytes.
+    /// Ensures every allocation (i.e; node) fits inside a block of this many bytes.
     ///
     /// If this config is set, and `slots_per_node` is not, then `slots_per_node` will be set to
-    /// the maximum number allowed by this config in order to reduce internal fragmentation.
-    /// Otherwise, if both are set, this config just adds a comptime constraint to `slots_per_node`.
-    desired_node_bytes: ?usize = null, // TODO: test
+    /// the maximum number allowed by this config in order to reduce memory wast.
+    /// Otherwise, if both are set, this config just adds an upper bound to `slots_per_node`.
+    bytes_per_node: ?usize = null,
 
     /// Overrides the default alignment of the array field containing each node's elements.
     /// Does not change the alignment of elements themselves.
     slots_alignment: ?usize = null,
 };
 
-// TODO: document context "trait" (including pseudo-key type)
-// TODO: check that all methods use constant space, document time complexity
 /// Generates a custom B-tree with the given parameters.
+///
+/// The resulting data structure stores values of type `Element`, sorted according to
+/// the total order defined by a "context" parameter used in lookups and insertions.
+/// This context can be any struct type with at least one member function:
+/// - `cmp(Self, Element, Element) std.math.Order`
+///
+/// The `lookup` method allows "adapated contexts" to be used in order to search for
+/// any type `Key` without constructing an `Element`:
+/// - `cmp(Self, Key, Element) std.math.Order`
+///
+/// Correctness of the B-tree requires these contexts to provide a consistent total order.
+/// See also: `AutoContext`
+///
+/// Unless otherwise stated, methods take time proportional to the height of the tree, which
+/// is logarithmic on the number of elements with a base equal to the order of the B-tree
+/// (i.e; the number of slots per node). Space complexity is constant by default.
 pub fn BTree(comptime config: Config) type {
     const Element = config.Element;
     const slots_alignment = config.slots_alignment orelse @alignOf(Element);
     const n = blk: {
         const slots_per_node = xxx: {
             if (config.slots_per_node) |requested_slots| break :xxx requested_slots;
-            if (config.desired_node_bytes) |bytes| break :xxx maxSlotsPerNode(Element, bytes, slots_alignment);
+            if (config.bytes_per_node) |bytes| break :xxx maxSlotsPerNode(Element, bytes, slots_alignment);
             break :xxx defaultSlotsPerNode(Element);
         };
-        // TODO: test compile-time errors
         if (slots_per_node < 2) @compileError("B-tree nodes need at least 2 slots");
         if (slots_per_node > math.maxInt(u31)) @compileError("too many slots per node");
-        if (config.desired_node_bytes) |desired_node_bytes| {
+        if (config.bytes_per_node) |bytes_per_node| {
             const node_size = @sizeOf(InternalNodeTemplate(Element, slots_per_node, slots_alignment));
-            if (node_size > desired_node_bytes) @compileError("incompatible number of slots and max bytes per node");
+            if (node_size > bytes_per_node) @compileError("incompatible number of slots and max bytes per node");
         }
         break :blk slots_per_node;
     };
     const bsearch_threshold = 2 * defaultSlotsPerNode(u64);
 
     return struct {
-        /// Number of element slots in each node.
-        pub const slots_per_node: u32 = n;
-
-        /// Whether or not lookups will use a binary search within each node.
+        /// Whether or not lookups will use a binary intra-node search.
         pub const use_binary_search: bool = config.use_binary_search orelse (n > bsearch_threshold);
 
-        // the B-tree itself is basically a fat pointer to the node root
+        // TODO: fill padding space in leaf nodes with extra slots
+        /// Number of element slots in each branch node.
+        pub const slots_per_node: u32 = n;
+
+        /// Maximum block size the tree will ever request on allocations.
+        pub const bytes_per_node: usize = @max(@sizeOf(ExternalNode), @sizeOf(InternalNode));
+
         root_: ?NodeHandle = null,
         total_in_use: usize = 0,
 
@@ -77,8 +96,8 @@ pub fn BTree(comptime config: Config) type {
         };
         const InternalNode = extern struct {
             header: NodeHeader = .{ .is_internal = true },
-            slots: [n]Element align(slots_alignment) = undefined,
             children: [n + 1]?NodeHandle = [_]?NodeHandle{null} ** (n + 1),
+            slots: [n]Element align(slots_alignment) = undefined,
 
             fn handle(self: *InternalNode) NodeHandle {
                 return &self.header;
@@ -114,8 +133,12 @@ pub fn BTree(comptime config: Config) type {
             assert(@sizeOf(NodeHeader) == @sizeOf(NodeHeaderTemplate));
         }
 
-        // TODO: document cursor invalidation
         /// Reference to a specific slot in a node; used to navigate the B-tree.
+        ///
+        /// When a cursor is first created by a B-tree, it is always **valid** (i.e; it points to
+        /// valid memory containing the expected element). Any mutating operation on the B-tree
+        /// may make the cursor **invalid**, so it still points to the same memory location, but
+        /// that memory might have been freed or may now hold an entirely different element.
         pub const Cursor = struct {
             node: NodeHandle,
             index: u32,
@@ -139,13 +162,9 @@ pub fn BTree(comptime config: Config) type {
                 defer assert(cursor.index < cursor.node.slots_in_use);
 
                 // at branch nodes, the next slot is the leftmost of the >subtree
-                if (cursor.node.asInternal()) |node| {
-                    var child = node.children[cursor.index + 1].?;
-                    while (child.asInternal()) |branch| {
-                        child = branch.children[0].?;
-                    }
-                    cursor.node = child;
-                    cursor.index = 0;
+                if (cursor.node.asInternal()) |branch| {
+                    cursor.node = branch.children[cursor.index + 1].?;
+                    subtreeMin(cursor);
                     return cursor.get();
                 }
 
@@ -167,7 +186,7 @@ pub fn BTree(comptime config: Config) type {
                         return cursor.get();
                     }
                 }
-                return null; // we're already at the biggest element in the tree
+                return null; // already at max
             }
 
             /// Tries to move the cursor to the previous element in the tree and get its address.
@@ -177,13 +196,9 @@ pub fn BTree(comptime config: Config) type {
                 defer assert(cursor.index < cursor.node.slots_in_use);
 
                 // at branch nodes, the previous slot is the rightmost of the <subtree
-                if (cursor.node.asInternal()) |node| {
-                    var child = node.children[cursor.index].?;
-                    while (child.asInternal()) |branch| {
-                        child = branch.children[branch.header.slots_in_use].?;
-                    }
-                    cursor.node = child;
-                    cursor.index = child.slots_in_use - 1;
+                if (cursor.node.asInternal()) |branch| {
+                    cursor.node = branch.children[cursor.index].?;
+                    subtreeMax(cursor);
                     return cursor.get();
                 }
 
@@ -205,19 +220,20 @@ pub fn BTree(comptime config: Config) type {
                         return cursor.get();
                     }
                 }
-                return null; // we're already at the smallest element in the tree
+                return null; // already at min
             }
         };
 
         const Tree = @This();
 
-        /// Returns the number of elements currently stored in the tree.
+        /// Returns the number of elements currently stored in the tree, in constant time.
         pub fn len(tree: Tree) usize {
             return tree.total_in_use;
         }
 
         /// Creates a cursor at the root node of the tree, pointing to any occupied slot.
         /// Returns `null` if the tree is empty.
+        /// Takes constant time.
         pub fn root(tree: Tree) ?Cursor {
             return if (tree.root_) |r| .{ .node = r, .index = 0 } else null;
         }
@@ -225,21 +241,29 @@ pub fn BTree(comptime config: Config) type {
         /// Returns a cursor to the smallest element in the tree, or `null` if empty.
         pub fn min(tree: Tree) ?Cursor {
             var cursor = tree.root() orelse return null;
+            subtreeMin(&cursor);
+            return cursor;
+        }
+
+        fn subtreeMin(cursor: *Cursor) void {
             while (cursor.node.asInternal()) |branch| {
                 cursor.node = branch.children[0].?;
             }
             cursor.index = 0;
-            return cursor;
         }
 
         /// Returns a cursor to the biggest element in the tree, or `null` if empty.
         pub fn max(tree: Tree) ?Cursor {
             var cursor = tree.root() orelse return null;
+            subtreeMax(&cursor);
+            return cursor;
+        }
+
+        fn subtreeMax(cursor: *Cursor) void {
             while (cursor.node.asInternal()) |branch| {
                 cursor.node = branch.children[branch.header.slots_in_use].?;
             }
             cursor.index = cursor.node.slots_in_use - 1;
-            return cursor;
         }
 
         // computes the leftmost index such that, by the context's total order,
@@ -277,7 +301,7 @@ pub fn BTree(comptime config: Config) type {
                 }
                 return .{ .found = false, .index = i };
             }
-            // TODO: check assembly and implement @Vector'ized version if needed
+            // TODO: check disassemble and implement @Vector'ized version if needed
         }
 
         /// Either a valid cursor at the element being looked up (if found), or an insertion hint.
@@ -296,7 +320,6 @@ pub fn BTree(comptime config: Config) type {
         /// If duplicates are present and an element was found, the resulting cursor is placed
         /// at the "first" (leftmost) element in the tree which compares equal to the search key.
         pub fn lookup(tree: Tree, key: anytype, context: anytype) LookupResult {
-            // go down the tree (if not empty) while looking for the requested key
             var node = tree.root_ orelse return .{ .not_found = null };
             while (node.asInternal()) |branch| {
                 const search = bisect(key, &branch.slots, branch.header.slots_in_use, context);
@@ -306,17 +329,19 @@ pub fn BTree(comptime config: Config) type {
                 }
                 node = branch.children[search.index].?;
             }
-
-            // if we reach a leaf, we either find the key here or declare defeat
             const leaf = node.asExternal().?;
             const search = bisect(key, &leaf.slots, leaf.header.slots_in_use, context);
             const cursor = Cursor{ .node = node, .index = search.index };
             return if (search.found) .{ .found = cursor } else .{ .not_found = cursor };
         }
 
-        fn shiftElement(slots: *align(slots_alignment) [n]Element, begin: u32, end: u32, x: Element) void {
+        fn shiftElement(slots: *[n]Element, begin: u32, end: u32, x: Element) void {
             mem.copyBackwards(Element, slots[begin + 1 .. end + 1], slots[begin..end]);
             slots[begin] = x;
+        }
+
+        fn unshiftElement(slots: *[n]Element, begin: u32, end: u32) void {
+            mem.copyForwards(Element, slots[begin .. end - 1], slots[begin + 1 .. end]);
         }
 
         fn reparent(child: NodeHandle, parent: *InternalNode, index: u32) void {
@@ -334,15 +359,21 @@ pub fn BTree(comptime config: Config) type {
             reparent(child, parent, index);
         }
 
-        /// Inserts an element in the tree, using the result of a previous lookup.
+        fn unshiftChild(parent: *InternalNode, index: u32) void {
+            for (index..parent.header.slots_in_use) |i| {
+                reparent(parent.children[i + 1].?, parent, @intCast(i));
+            }
+        }
+
+        /// Inserts an element in the tree using the result of a previous lookup.
         ///
         /// If the lookup result indicates that the element was already in the tree,
-        /// this procedure will insert a duplicate, otherwise it is a simple insertion.
-        /// In any case, all existing cursors may be invalidated by this procedure.
+        /// **this procedure will insert a duplicate**, otherwise it is a simple insertion.
         ///
         /// On success, returns a cursor placed over the just-inserted element.
+        /// **This cursor is the only one guaranteed to be valid after this operation**.
         ///
-        /// NOTE: In the current implementation, an `OutOfMemory` error is irrecoverable,
+        /// NOTE: Some allocation failures are unrecoverable errors (`UnrecoverableOom`),
         /// meaning that the B-tree may be left in an inconsistent state, which can lead to
         /// further undefined behavior, crashes and/or memory leaks. In case this happens,
         /// the best course of action is to stop using the tree immediately and, if possible,
@@ -353,19 +384,18 @@ pub fn BTree(comptime config: Config) type {
             position: LookupResult,
             element: Element,
             context: anytype,
-        ) Allocator.Error!Cursor {
+        ) (error{UnrecoverableOom} || Allocator.Error)!Cursor {
             // validate given hint and extract a precise insertion location from it
             const start: struct { node: *ExternalNode, index: u32 } = switch (position) {
                 .not_found => |nf| blk: {
                     if (nf) |cursor| { // if not found, we should be at a leaf node
                         break :blk .{ .node = cursor.node.asExternal().?, .index = cursor.index };
-                    } else { // (or null, in which case we allocate a root node)
-                        assert(tree.root_ == null);
+                    } else if (tree.root_ == null) { // (which could be an empty root)
                         const new_root = try allocator.create(ExternalNode);
-                        new_root.* = ExternalNode{};
+                        new_root.* = .{};
                         tree.root_ = new_root.handle();
-                        break :blk .{ .node = new_root, .index = 0 };
                     }
+                    break :blk .{ .node = tree.root_.?.asExternal().?, .index = 0 };
                 },
                 .found => |cursor| blk: { // someone wants duplicates ...
                     if (cursor.node.asExternal()) |leaf| {
@@ -398,9 +428,11 @@ pub fn BTree(comptime config: Config) type {
 
             // hard case: insert with a split at the leaf node ...
             const new_leaf = try allocator.create(ExternalNode);
-            new_leaf.* = ExternalNode{};
+            new_leaf.* = .{};
             tree.total_in_use += 1;
             const leaf_cursor = splitLeaf(leaf, new_leaf, element, start.index);
+            // NOTE: after this point, OOM is an irrecoverable error
+
             // then, move the median element of the just-split subtree up to its parent
             // in order to add the newly-created child pointer. this may trigger splits
             // recursively as we go up the tree. it stops when there are no overflows or
@@ -427,8 +459,8 @@ pub fn BTree(comptime config: Config) type {
                 }
 
                 // recursive split case
-                const new_branch = try allocator.create(InternalNode);
-                new_branch.* = InternalNode{};
+                const new_branch = allocator.create(InternalNode) catch return error.UnrecoverableOom;
+                new_branch.* = .{};
                 const parent_cursor = splitBranch(parent, new_branch, median, new_sibling, index);
 
                 // update loop variables
@@ -446,8 +478,8 @@ pub fn BTree(comptime config: Config) type {
             // we need to add an upper level to the tree with a new root. the new root
             // contains two children (the split-up old root) and one element (median of the split)
             assert(node == tree.root_.?);
-            const new_root = try allocator.create(InternalNode);
-            new_root.* = InternalNode{};
+            const new_root = allocator.create(InternalNode) catch return error.UnrecoverableOom;
+            new_root.* = .{};
             new_root.header.slots_in_use = 1;
             new_root.slots[0] = median;
             reparent(node, new_root, 0);
@@ -455,22 +487,21 @@ pub fn BTree(comptime config: Config) type {
             tree.root_ = new_root.handle();
             const root_cursor = Cursor{ .node = new_root.handle(), .index = 0 };
             return if (return_child_cursor) child_cursor else root_cursor;
-            // TODO: consider failing `try`s
         }
 
         fn splitLeaf(left: *ExternalNode, right: *ExternalNode, key: Element, pos: u32) Cursor {
-            return splitImpl(left, right, key, {}, pos);
+            return splitImpl(ExternalNode, left, right, key, {}, pos);
         }
 
         fn splitBranch(left: *InternalNode, right: *InternalNode, key: Element, child: NodeHandle, pos: u32) Cursor {
-            return splitImpl(left, right, key, child, pos);
+            return splitImpl(InternalNode, left, right, key, child, pos);
         }
 
-        fn splitImpl(left: anytype, right: anytype, key: Element, child: anytype, pos: u32) Cursor {
+        fn splitImpl(comptime Node: type, left: *Node, right: *Node, key: Element, child: anytype, pos: u32) Cursor {
             assert(left.header.slots_in_use == slots_per_node);
             assert(right.header.slots_in_use == 0);
             assert(pos <= slots_per_node);
-            const is_branch = (@TypeOf(left) == *InternalNode);
+            const is_branch = (Node == InternalNode);
 
             var cursor: Cursor = undefined;
             const mid = slots_per_node / 2;
@@ -524,6 +555,9 @@ pub fn BTree(comptime config: Config) type {
         }
 
         /// Deallocates all nodes in the tree.
+        ///
+        /// This is the only B-tree method with a non-constant space complexity;
+        /// it uses stack space proportional to the height of the tree.
         pub fn clear(tree: *Tree, allocator: Allocator) void {
             if (tree.root_) |r| deallocate(allocator, r);
             tree.* = .{};
@@ -542,19 +576,156 @@ pub fn BTree(comptime config: Config) type {
             }
         }
 
-        // TODO: remove / delete
+        const min_load = slots_per_node / 2;
+
+        /// Deletes the element referenced by the given cursor.
+        ///
+        /// **This operation may invalidate any existing `Cursor`s, including the given one**.
+        pub fn delete(tree: *Tree, allocator: Allocator, cursor: Cursor) void {
+            // steal biggest element of left subtree when deleting at branch nodes
+            if (cursor.node.asInternal()) |branch| {
+                var prevCursor = cursor;
+                const biggestOfLeftSubtree = prevCursor.prev().?;
+                branch.slots[cursor.index] = biggestOfLeftSubtree.*;
+                tree.delete(allocator, prevCursor);
+                return;
+            }
+
+            // at leafs, do the unshift, then check for underflow
+            var leaf = cursor.node.asExternal().?;
+            unshiftElement(&leaf.slots, cursor.index, leaf.header.slots_in_use);
+            leaf.header.slots_in_use -= 1;
+            tree.total_in_use -= 1;
+            if (leaf.header.slots_in_use >= min_load) return;
+
+            // on underflow, start rebalancing at the leaf
+            leaf = rebalanceLeaf(tree, allocator, leaf);
+            var node = leaf.header.parent;
+            while (node) |branch| {
+                if (branch.header.slots_in_use >= min_load) break;
+                const possiblyMerged = rebalanceBranch(tree, allocator, branch);
+                node = possiblyMerged.header.parent;
+            }
+        }
+
+        fn rebalanceLeaf(tree: *Tree, allocator: Allocator, leaf: *ExternalNode) *ExternalNode {
+            return rebalanceImpl(ExternalNode, tree, allocator, leaf);
+        }
+
+        fn rebalanceBranch(tree: *Tree, allocator: Allocator, branch: *InternalNode) *InternalNode {
+            return rebalanceImpl(InternalNode, tree, allocator, branch);
+        }
+
+        fn rebalanceImpl(comptime Node: type, tree: *Tree, allocator: Allocator, node: *Node) *Node {
+            assert(node.header.slots_in_use < min_load);
+            if (node.header.parent == null) {
+                // this early return means that we never deallocate the root, even if it is
+                // empty after a deletion. we keep it pre-allocated and only free in clear()
+                assert(node.handle() == tree.root_);
+                return node;
+            }
+
+            const is_branch = (Node == InternalNode);
+
+            const parent = node.header.parent.?;
+            const child_index = node.header.index_in_parent;
+            assert(parent.children[child_index].? == node.handle());
+
+            const left_sibling: ?*Node = if (child_index > 0)
+                @alignCast(@ptrCast(parent.children[child_index - 1].?))
+            else
+                null;
+
+            const right_sibling: ?*Node = if (child_index < parent.header.slots_in_use)
+                @alignCast(@ptrCast(parent.children[child_index + 1].?))
+            else
+                null;
+
+            if (existsAndHasSpare(Node, right_sibling)) |right| { // counter-clockwise rotation
+                const separator_index = child_index;
+                node.slots[node.header.slots_in_use] = parent.slots[separator_index];
+                node.header.slots_in_use += 1;
+                parent.slots[separator_index] = right.slots[0];
+                unshiftElement(&right.slots, 0, right.header.slots_in_use);
+                if (is_branch) {
+                    const sparePointer = right.children[0].?;
+                    unshiftChild(right, 0);
+                    shiftChild(node, node.header.slots_in_use, sparePointer);
+                }
+                right.header.slots_in_use -= 1;
+                return node;
+            } else if (existsAndHasSpare(Node, left_sibling)) |left| { // clockwise rotation
+                const separator_index = child_index - 1;
+                shiftElement(&node.slots, 0, node.header.slots_in_use, parent.slots[separator_index]);
+                node.header.slots_in_use += 1;
+                parent.slots[separator_index] = left.slots[left.header.slots_in_use - 1];
+                if (is_branch) {
+                    shiftChild(node, 0, left.children[left.header.slots_in_use].?);
+                }
+                left.header.slots_in_use -= 1;
+                return node;
+            } else { // merge two sibling nodes and delete the rightmost
+                var left: *Node = undefined;
+                var right: *Node = undefined;
+                var separator_index: u32 = undefined;
+                if (right_sibling != null) {
+                    left = node;
+                    right = right_sibling.?;
+                    separator_index = child_index;
+                } else {
+                    assert(left_sibling != null);
+                    left = left_sibling.?;
+                    right = node;
+                    separator_index = child_index - 1;
+                }
+                assert(left.header.slots_in_use + right.header.slots_in_use < slots_per_node);
+
+                // separator element in parent moves down
+                left.slots[left.header.slots_in_use] = parent.slots[separator_index];
+                left.header.slots_in_use += 1;
+                unshiftElement(&parent.slots, separator_index, parent.header.slots_in_use);
+                unshiftChild(parent, separator_index + 1);
+                parent.header.slots_in_use -= 1;
+
+                // merge left <- right
+                for (0..right.header.slots_in_use) |i| {
+                    left.slots[left.header.slots_in_use + i] = right.slots[i];
+                }
+                if (is_branch) {
+                    for (0..right.header.slots_in_use + 1) |i| {
+                        reparent(right.children[i].?, left, @intCast(left.header.slots_in_use + i));
+                    }
+                }
+                left.header.slots_in_use += right.header.slots_in_use;
+                allocator.destroy(right);
+
+                // if the root just became empty, delete it and make the tree
+                // shallower by using the merged node as the new root
+                if (parent.handle() == tree.root_ and parent.header.slots_in_use == 0) {
+                    allocator.destroy(parent);
+                    tree.root_ = left.handle();
+                    tree.root_.?.parent = null;
+                }
+
+                return left;
+            }
+        }
+
+        fn existsAndHasSpare(comptime Node: type, node: ?*Node) ?*Node {
+            if (node == null) return null;
+            return if (node.?.header.slots_in_use > min_load) node.? else null;
+        }
     };
 }
 
-// TODO: test implemented stuff, including:
-// - adapted context with a different pseudo-key type
-test "BTree" {
+test "BTree as an ordered set with AutoContext" {
     // tip: debug w/ visualizer at https://www.cs.usfca.edu/~galles/visualization/BTree.html
     inline for ([_]bool{ true, false }) |bsearch| {
+        const B3 = BTree(.{ .Element = i32, .slots_per_node = 3, .use_binary_search = bsearch });
+
         const alloc = testing.allocator;
         const ctx = AutoContext(i32){};
-        const B3 = BTree(.{ .Element = i32, .slots_per_node = 3, .use_binary_search = bsearch });
-        var btree = B3{};
+        var set = B3{};
         const payload = [_]i32{
             34, 33, 38,
             28, 27, 22,
@@ -566,40 +737,40 @@ test "BTree" {
 
         // deferred cleaning + empty test
         defer {
-            btree.clear(alloc);
-            assert(btree.len() == 0);
+            set.clear(alloc);
+            assert(set.len() == 0);
             for (payload) |x| {
-                assert(switch (btree.lookup(x, ctx)) {
+                assert(switch (set.lookup(x, ctx)) {
                     .not_found => true,
                     .found => false,
                 });
             }
         }
 
-        // lookup/insert test
-        try testing.expectEqual(@as(usize, 0), btree.len());
-        for (payload) |x| {
-            const pre_insert_lookup = btree.lookup(x, ctx);
-            try testing.expect(switch (pre_insert_lookup) {
-                .not_found => true,
-                .found => false,
-            });
+        // lookup / insert test
+        try testing.expectEqual(@as(usize, 0), set.len());
+        for (payload) |element| {
+            const pre_insert_lookup = set.lookup(element, ctx);
+            switch (pre_insert_lookup) {
+                .found => return error.FoundElementNotInserted,
+                .not_found => {},
+            }
 
-            const cursor = try btree.insert(alloc, pre_insert_lookup, x, ctx);
-            try testing.expectEqual(x, cursor.get().*);
+            const cursor = try set.insert(alloc, pre_insert_lookup, element, ctx);
+            try testing.expectEqual(element, cursor.get().*);
 
-            const post_insert_lookup = btree.lookup(x, ctx);
+            const post_insert_lookup = set.lookup(element, ctx);
             switch (post_insert_lookup) {
                 .found => |c| try testing.expectEqual(cursor, c),
-                .not_found => try testing.expect(false),
+                .not_found => return error.InsertedElementNotFound,
             }
         }
 
         // testing both ordered iterators
         // also an insertion sanity check: b-tree can't come up with values not in the payload
-        try testing.expectEqual(payload.len, btree.len());
-        var asc = btree.min().?;
-        var desc = btree.max().?;
+        try testing.expectEqual(payload.len, set.len());
+        var asc = set.min().?;
+        var desc = set.max().?;
         var iterated_length: usize = 0;
         while (true) {
             const asc_count = mem.count(i32, &payload, &[_]i32{asc.get().*});
@@ -612,8 +783,77 @@ test "BTree" {
             try testing.expectEqual(asc_next == null, desc_prev == null);
             if (asc_next == null) break;
         }
-        try testing.expectEqual(btree.len(), iterated_length);
+        try testing.expectEqual(set.len(), iterated_length);
+
+        // deletion test removes all but the last 3 elements, in reverse order
+        const n = payload.len;
+        for (1..n - 2) |i| {
+            const element = payload[n - i];
+
+            const pre_delete_lookup = set.lookup(element, ctx);
+            switch (pre_delete_lookup) {
+                .found => |cursor| {
+                    try testing.expectEqual(element, cursor.get().*);
+                    set.delete(alloc, cursor);
+                },
+                .not_found => return error.InsertedElementNotFound,
+            }
+
+            const post_delete_lookup = set.lookup(element, ctx);
+            switch (post_delete_lookup) {
+                .found => return error.FoundDeletedElement,
+                .not_found => {},
+            }
+        }
     }
+}
+
+test "BTree as an ordered multiset with adapted lookup context" {
+    const S = extern struct { key: i32, discriminator: u32 };
+    const DefaultContext = struct {
+        fn cmp(_: @This(), lhs: S, rhs: S) math.Order {
+            return math.order(lhs.key, rhs.key);
+        }
+    };
+    const AdaptedKeyContext = struct {
+        fn cmp(_: @This(), lhs: i32, rhs: S) math.Order {
+            return math.order(lhs, rhs.key);
+        }
+    };
+
+    const alloc = testing.allocator;
+    var multiset = BTree(.{ .Element = S }){};
+    defer multiset.clear(alloc);
+    const payload = [_]i32{ 1, 2, 4, 5, 6, 4 };
+
+    try testing.expectEqual(@as(usize, 0), multiset.len());
+    var count: u32 = 0;
+    for (payload) |key| {
+        // notice that we perform the lookup by key only, BEFORE creating the element
+        const hint = multiset.lookup(key, AdaptedKeyContext{});
+        const element = S{ .key = key, .discriminator = count };
+        // the ordering context provided to insert needs to deal with elements, not keys
+        const cursor = try multiset.insert(alloc, hint, element, DefaultContext{});
+        count += 1;
+        try testing.expectEqual(element, cursor.get().*);
+    }
+    try testing.expectEqual(payload.len, multiset.len());
+
+    // delete both duplicates with key = 4
+    switch (multiset.lookup(4, AdaptedKeyContext{})) {
+        .found => |cursor| multiset.delete(alloc, cursor),
+        .not_found => return error.InsertedElementNotFound,
+    }
+    try testing.expectEqual(payload.len - 1, multiset.len());
+    switch (multiset.lookup(4, AdaptedKeyContext{})) {
+        .found => |cursor| multiset.delete(alloc, cursor),
+        .not_found => return error.InsertedElementNotFound,
+    }
+    switch (multiset.lookup(4, AdaptedKeyContext{})) {
+        .found => return error.FoundDeletedElement,
+        .not_found => {},
+    }
+    try testing.expectEqual(payload.len - 2, multiset.len());
 }
 
 // same structure as an actual BTree, but with the wrong type of parent ptr
@@ -655,14 +895,14 @@ fn InternalNodeTemplate(comptime Element: type, comptime n: usize, comptime slot
     };
 }
 
-/// Creates a closure which can be used as a total order context in a `BTree`.
+/// Creates a total ordering context for built-in types.
 ///
-/// Implemented in terms of `std.math.order`.
-/// NOTE: `std.math.order` does NOT implement a total order for floating-point types,
-/// so it should be avoided whenever `NaN`s are going to be stored in an ordered container.
+/// NOTE: This does NOT implement a total order for floating-point types, so unless
+/// `NaN`s are impossible, avoid using this with floats.
 pub fn AutoContext(comptime T: type) type {
     return struct {
-        pub fn cmp(_: @This(), lhs: T, rhs: T) math.Order {
+        const Self = @This();
+        pub fn cmp(_: Self, lhs: T, rhs: T) math.Order {
             return math.order(lhs, rhs);
         }
     };

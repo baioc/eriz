@@ -1,4 +1,26 @@
-//! TODO: top-level docs
+//! Generic B-tree data structure (not a B+ tree).
+//!
+//! In general, [B-trees](https://en.wikipedia.org/wiki/B-tree) are optimized for "cache
+//! friendliness" and low overhead per stored element.
+//! Their main tradeoff w.r.t. other self-balancing trees is that **any insertion or
+//! deletion may move multiple elements in memory, invalidating references and iterators**.
+//! See also: `BTree.Cursor`.
+//!
+//! **When elements are big, consider keeping them elsewhere and storing only "handles" in the
+//! tree**; a custom comparator can then be provided in order to sort handles according to the
+//! order of the elements themselves.
+//! See also: `BTree`.
+//!
+//! Modern usage of the name "B-tree" for a data structure is usually (and especially in the
+//! context of databases) referring to a [B+ tree](https://en.wikipedia.org/wiki/B%2B_tree);
+//! in general, iterating over all elements in a B+ tree is faster than in a B-tree.
+//! However, B+ trees store multiple copies of keys, and may keep using these copies as part of an
+//! index after the corresponding element has been deleted.
+//! In an unmanaged environment, storing extra keys may lead to issues with memory (de)allocation,
+//! making it hard to sort elements residing outside the tree (as in the "handles" example above).
+//! **Not needing extra key copies** is the main advantage of an in-memory B-tree over a B+ tree
+//! (and if you're always storing value types as keys, a modern
+//! [radix tree](https://en.wikipedia.org/wiki/Radix_tree) is probably faster anyway).
 
 const std = @import("std");
 const math = std.math;
@@ -26,7 +48,7 @@ pub const Config = struct {
     /// Ensures every allocation (i.e; node) fits inside a block of this many bytes.
     ///
     /// If this config is set, and `slots_per_node` is not, then `slots_per_node` will be set to
-    /// the maximum number allowed by this config in order to reduce memory wast.
+    /// the maximum number allowed by this config in order to reduce memory waste.
     /// Otherwise, if both are set, this config just adds an upper bound to `slots_per_node`.
     bytes_per_node: ?usize = null,
 
@@ -35,7 +57,7 @@ pub const Config = struct {
     slots_alignment: ?usize = null,
 };
 
-/// Generates a custom B-tree with the given parameters.
+/// Generates a custom B-tree with the given configuration.
 ///
 /// The resulting data structure stores values of type `Element`, sorted according to
 /// the total order defined by a "context" parameter used in lookups and insertions.
@@ -51,7 +73,7 @@ pub const Config = struct {
 ///
 /// Unless otherwise stated, methods take time proportional to the height of the tree, which
 /// is logarithmic on the number of elements with a base equal to the order of the B-tree
-/// (i.e; the number of slots per node). Space complexity is constant by default.
+/// (i.e; the number of slots per node). Space complexity is O(1) by default.
 pub fn BTree(comptime config: Config) type {
     const Element = config.Element;
     const slots_alignment = config.slots_alignment orelse @alignOf(Element);
@@ -79,7 +101,7 @@ pub fn BTree(comptime config: Config) type {
         /// Number of element slots in each branch node.
         pub const slots_per_node: u32 = n;
 
-        /// Maximum block size the tree will ever request on allocations.
+        /// Maximum block size the tree will ever request per allocation.
         pub const bytes_per_node: usize = @max(@sizeOf(ExternalNode), @sizeOf(InternalNode));
 
         root_: ?NodeHandle = null,
@@ -139,11 +161,14 @@ pub fn BTree(comptime config: Config) type {
         /// valid memory containing the expected element). Any mutating operation on the B-tree
         /// may make the cursor **invalid**, so it still points to the same memory location, but
         /// that memory might have been freed or may now hold an entirely different element.
+        /// Therefore, **dereferencing an invalid cursor leads to U.B.**
+        ///
+        /// Methods have O(1) space and time complexity, unless stated otherwise.
         pub const Cursor = struct {
             node: NodeHandle,
             index: u32,
 
-            /// Gets the address of the element being referenced by this cursor.
+            /// Gets the address of the element being referenced by this cursor
             pub fn get(cursor: Cursor) *Element {
                 assert(cursor.node.slots_in_use > 0);
                 assert(cursor.index < cursor.node.slots_in_use);
@@ -157,6 +182,10 @@ pub fn BTree(comptime config: Config) type {
 
             /// Tries to move the cursor to the next element in the tree and get its address.
             /// When it can't, this returns `null` and does NOT mutate the cursor.
+            ///
+            /// This method takes constant time when the cursor stays in the same leaf node,
+            /// but may need to climb the entire height of the tree in the worst case.
+            /// Still, **iterating over all `N` elements has time complexity in O(N)**.
             pub fn next(cursor: *Cursor) ?*Element {
                 assert(cursor.index < cursor.node.slots_in_use);
                 defer assert(cursor.index < cursor.node.slots_in_use);
@@ -191,6 +220,10 @@ pub fn BTree(comptime config: Config) type {
 
             /// Tries to move the cursor to the previous element in the tree and get its address.
             /// When it can't, this returns `null` and does NOT mutate the cursor.
+            ///
+            /// This method takes constant time when the cursor stays in the same leaf node,
+            /// but may need to climb the entire height of the tree in the worst case.
+            /// Still, **iterating over all `N` elements has time complexity in O(N)**.
             pub fn prev(cursor: *Cursor) ?*Element {
                 assert(cursor.index < cursor.node.slots_in_use);
                 defer assert(cursor.index < cursor.node.slots_in_use);
@@ -365,6 +398,9 @@ pub fn BTree(comptime config: Config) type {
             }
         }
 
+        /// Error set of `insert` operations.
+        pub const InsertError = error{UnrecoverableOom} || Allocator.Error;
+
         /// Inserts an element in the tree using the result of a previous lookup.
         ///
         /// If the lookup result indicates that the element was already in the tree,
@@ -375,16 +411,18 @@ pub fn BTree(comptime config: Config) type {
         ///
         /// NOTE: Some allocation failures are unrecoverable errors (`UnrecoverableOom`),
         /// meaning that the B-tree may be left in an inconsistent state, which can lead to
-        /// further undefined behavior, crashes and/or memory leaks. In case this happens,
-        /// the best course of action is to stop using the tree immediately and, if possible,
-        /// deallocate all memory allocated during previous inserts.
+        /// further undefined behavior, crashes and/or memory leaks.
+        /// If this happens, the best course of action is to stop using the tree immediately.
+        /// Even better: make sure the allocator can provide for the worst case scenario of
+        /// `h + 1` new node allocations, where `h` is the current height of the B-tree, and
+        /// unrecoverable errors will never happen.
         pub fn insert(
             tree: *Tree,
             allocator: Allocator,
             position: LookupResult,
             element: Element,
             context: anytype,
-        ) (error{UnrecoverableOom} || Allocator.Error)!Cursor {
+        ) InsertError!Cursor {
             // validate given hint and extract a precise insertion location from it
             const start: struct { node: *ExternalNode, index: u32 } = switch (position) {
                 .not_found => |nf| blk: {
@@ -554,10 +592,7 @@ pub fn BTree(comptime config: Config) type {
             return cursor;
         }
 
-        /// Deallocates all nodes in the tree.
-        ///
-        /// This is the only B-tree method with a non-constant space complexity;
-        /// it uses stack space proportional to the height of the tree.
+        /// Deallocates all nodes in the tree, using stack space proportional to its height.
         pub fn clear(tree: *Tree, allocator: Allocator) void {
             if (tree.root_) |r| deallocate(allocator, r);
             tree.* = .{};
@@ -718,7 +753,7 @@ pub fn BTree(comptime config: Config) type {
     };
 }
 
-test "BTree as an ordered set with AutoContext" {
+test "BTree: ordered set using AutoContext" {
     // tip: debug w/ visualizer at https://www.cs.usfca.edu/~galles/visualization/BTree.html
     inline for ([_]bool{ true, false }) |bsearch| {
         const B3 = BTree(.{ .Element = i32, .slots_per_node = 3, .use_binary_search = bsearch });
@@ -808,7 +843,7 @@ test "BTree as an ordered set with AutoContext" {
     }
 }
 
-test "BTree as an ordered multiset with adapted lookup context" {
+test "BTree: ordered multiset with adapted lookup context" {
     const S = extern struct { key: i32, discriminator: u32 };
     const DefaultContext = struct {
         fn cmp(_: @This(), lhs: S, rhs: S) math.Order {
@@ -890,8 +925,8 @@ fn maxSlotsPerNode(comptime Element: type, comptime max_bytes: usize, comptime s
 fn InternalNodeTemplate(comptime Element: type, comptime n: usize, comptime slots_alignment: usize) type {
     return extern struct {
         header: NodeHeaderTemplate,
-        slots: [n]Element align(slots_alignment),
         children: [n + 1]?*NodeHeaderTemplate,
+        slots: [n]Element align(slots_alignment),
     };
 }
 
@@ -908,7 +943,7 @@ pub fn AutoContext(comptime T: type) type {
     };
 }
 
-test "AutoContext" {
+test "AutoContext: built-in types are sorted correctly" {
     const Order = math.Order;
 
     inline for ([_]type{ u8, i32, usize, f32, f64 }) |Number| {

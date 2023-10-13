@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const root_file = "src/btree.zig";
+const root_file = "src/eriz.zig";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

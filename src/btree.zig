@@ -33,8 +33,8 @@ const assert = std.debug.assert;
 pub const Config = struct {
     /// Type of elements being stored in the tree.
     ///
-    /// If a custom struct is used here, it must be either an `extern struct` or
-    /// an ABI-sized `packed struct`.
+    /// XXX: If a custom struct is used here, it must be either an `extern struct`
+    /// or an ABI-sized `packed struct`.
     Element: type,
 
     /// Whether to use a binary search inside each node. Leave `null` in order
@@ -334,7 +334,7 @@ pub fn BTree(comptime config: Config) type {
                 }
                 return .{ .found = false, .index = i };
             }
-            // TODO: check disassemble and implement @Vector'ized version if needed
+            // TODO: check disassembly and implement @Vector'ized version if needed
         }
 
         /// Either a valid cursor at the element being looked up (if found), or an insertion hint.
@@ -385,8 +385,7 @@ pub fn BTree(comptime config: Config) type {
 
         fn shiftChild(parent: *InternalNode, index: u32, child: NodeHandle) void {
             var i = parent.header.slots_in_use;
-            assert(i > 0);
-            while (i - 1 >= index) : (i -= 1) {
+            while (i >= index + 1) : (i -= 1) {
                 reparent(parent.children[i - 1].?, parent, i);
             }
             reparent(child, parent, index);

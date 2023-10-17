@@ -10,6 +10,10 @@ test {
     std.testing.refAllDecls(math);
 }
 
+const stdlib = @cImport({
+    @cInclude("stdlib.h");
+    @cInclude("stdio.h");
+});
 const Allocator = std.mem.Allocator;
 const Accumulator = math.Accumulator(f64);
 
@@ -89,11 +93,11 @@ const String32Context = struct {
     }
 };
 
-fn randomize(comptime T: type, random: *std.rand.Random, output: *T) !void {
+fn randomize(comptime T: type, output: *T) !void {
     if (T == i32) {
-        output.* = random.int(i32);
+        output.* = stdlib.rand();
     } else if (T == [32]u8) {
-        random.bytes(output);
+        _ = stdlib.snprintf(output.ptr, output.len, "%031d", stdlib.rand());
     } else {
         @compileError("randomize not implemented for type " ++ @typeName(T));
     }
@@ -117,10 +121,8 @@ fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocato
     const buffer = try allocator.alloc(Element, n2);
     defer allocator.free(buffer);
 
-    // TODO: use rand() from libc in order to match D experimental payloads
-    var prng = std.rand.DefaultPrng.init(0);
-    var random = prng.random();
-    for (buffer) |*x| try randomize(Element, &random, x);
+    stdlib.srand(0);
+    for (buffer) |*x| try randomize(Element, x);
 
     const xs = buffer[0..n];
     const xs2 = buffer[0..n2];

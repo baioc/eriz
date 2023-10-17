@@ -28,6 +28,7 @@ const mem = std.mem;
 const testing = std.testing;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
+const cache_line = std.atomic.cache_line;
 
 /// Static parameters used to generate a custom B-tree.
 pub const Config = struct {
@@ -76,22 +77,38 @@ pub const Config = struct {
 /// (i.e; the number of slots per node). Space complexity is O(1) by default.
 pub fn BTree(comptime config: Config) type {
     const Element = config.Element;
-    const slots_alignment = config.slots_alignment orelse @alignOf(Element);
+    const is_numeric = std.meta.trait.isNumber(Element);
+
+    if (config.bytes_per_node) |bytes| {
+        if (bytes < cache_line) @compileError("nodes must have at least as many bytes as a cache line");
+    }
+
+    const min_align = @alignOf(Element);
+    const simd_align = 16;
+    const default_alignment = if (is_numeric) @max(min_align, simd_align) else min_align;
+    const slots_alignment = config.slots_alignment orelse default_alignment;
+
     const n = blk: {
         const slots_per_node = xxx: {
             if (config.slots_per_node) |requested_slots| break :xxx requested_slots;
-            if (config.bytes_per_node) |bytes| break :xxx maxSlotsPerNode(Element, bytes, slots_alignment);
-            break :xxx defaultSlotsPerNode(Element);
+            if (config.bytes_per_node) |bytes| break :xxx maxSlotsPerNode(Element, slots_alignment, bytes);
+            break :xxx defaultSlotsPerNode(Element, slots_alignment);
         };
+
         if (slots_per_node < 2) @compileError("B-tree nodes need at least 2 slots");
         if (slots_per_node > math.maxInt(u31)) @compileError("too many slots per node");
         if (config.bytes_per_node) |bytes_per_node| {
-            const node_size = @sizeOf(InternalNodeTemplate(Element, slots_per_node, slots_alignment));
+            const node_size = @sizeOf(InternalNodeTemplate(Element, slots_alignment, slots_per_node));
             if (node_size > bytes_per_node) @compileError("incompatible number of slots and max bytes per node");
         }
+
         break :blk slots_per_node;
     };
-    const bsearch_threshold = 2 * defaultSlotsPerNode(u64);
+
+    const min_threshold = 8;
+    const u8_limit = 256;
+    const numeric_limit = u8_limit / @sizeOf(Element);
+    const bsearch_threshold = if (is_numeric) @max(min_threshold, numeric_limit) else min_threshold;
 
     return struct {
         /// Whether or not lookups will use a binary intra-node search.
@@ -104,12 +121,12 @@ pub fn BTree(comptime config: Config) type {
         /// Maximum block size the tree will ever request per allocation.
         pub const bytes_per_node: usize = @max(@sizeOf(ExternalNode), @sizeOf(InternalNode));
 
-        root_: ?NodeHandle = null,
+        root_handle: ?NodeHandle = null,
         total_in_use: usize = 0,
 
         // every node is either an external (leaf) or an internal (branch) node
         const ExternalNode = extern struct {
-            header: NodeHeader = .{ .is_internal = false },
+            header: NodeHeader align(cache_line) = .{ .is_internal = false },
             slots: [n]Element align(slots_alignment) = undefined,
 
             fn handle(self: *ExternalNode) NodeHandle {
@@ -117,7 +134,7 @@ pub fn BTree(comptime config: Config) type {
             }
         };
         const InternalNode = extern struct {
-            header: NodeHeader = .{ .is_internal = true },
+            header: NodeHeader align(cache_line) = .{ .is_internal = true },
             children: [n + 1]?NodeHandle = [_]?NodeHandle{null} ** (n + 1),
             slots: [n]Element align(slots_alignment) = undefined,
 
@@ -126,7 +143,7 @@ pub fn BTree(comptime config: Config) type {
             }
         };
         comptime {
-            const Template = InternalNodeTemplate(Element, n, slots_alignment);
+            const Template = InternalNodeTemplate(Element, slots_alignment, n);
             assert(@sizeOf(InternalNode) == @sizeOf(Template));
         }
 
@@ -268,7 +285,7 @@ pub fn BTree(comptime config: Config) type {
         /// Returns `null` if the tree is empty.
         /// Takes constant time.
         pub fn root(tree: Tree) ?Cursor {
-            return if (tree.root_) |r| .{ .node = r, .index = 0 } else null;
+            return if (tree.root_handle) |r| .{ .node = r, .index = 0 } else null;
         }
 
         /// Returns a cursor to the smallest element in the tree, or `null` if empty.
@@ -353,7 +370,7 @@ pub fn BTree(comptime config: Config) type {
         /// If duplicates are present and an element was found, the resulting cursor is placed
         /// at the "first" (leftmost) element in the tree which compares equal to the search key.
         pub fn lookup(tree: Tree, key: anytype, context: anytype) LookupResult {
-            var node = tree.root_ orelse return .{ .not_found = null };
+            var node = tree.root_handle orelse return .{ .not_found = null };
             while (node.asInternal()) |branch| {
                 const search = bisect(key, &branch.slots, branch.header.slots_in_use, context);
                 if (search.found) {
@@ -427,12 +444,12 @@ pub fn BTree(comptime config: Config) type {
                 .not_found => |nf| blk: {
                     if (nf) |cursor| { // if not found, we should be at a leaf node
                         break :blk .{ .node = cursor.node.asExternal().?, .index = cursor.index };
-                    } else if (tree.root_ == null) { // (which could be an empty root)
+                    } else if (tree.root_handle == null) { // (which could be an empty root)
                         const new_root = try allocator.create(ExternalNode);
                         new_root.* = .{};
-                        tree.root_ = new_root.handle();
+                        tree.root_handle = new_root.handle();
                     }
-                    break :blk .{ .node = tree.root_.?.asExternal().?, .index = 0 };
+                    break :blk .{ .node = tree.root_handle.?.asExternal().?, .index = 0 };
                 },
                 .found => |cursor| blk: { // someone wants duplicates ...
                     if (cursor.node.asExternal()) |leaf| {
@@ -514,14 +531,14 @@ pub fn BTree(comptime config: Config) type {
             // if we got here, it means that we've just split our old tree root, so
             // we need to add an upper level to the tree with a new root. the new root
             // contains two children (the split-up old root) and one element (median of the split)
-            assert(node == tree.root_.?);
+            assert(node == tree.root_handle.?);
             const new_root = allocator.create(InternalNode) catch return error.UnrecoverableOom;
             new_root.* = .{};
             new_root.header.slots_in_use = 1;
             new_root.slots[0] = median;
             reparent(node, new_root, 0);
             reparent(new_sibling, new_root, 1);
-            tree.root_ = new_root.handle();
+            tree.root_handle = new_root.handle();
             const root_cursor = Cursor{ .node = new_root.handle(), .index = 0 };
             return if (return_child_cursor) child_cursor else root_cursor;
         }
@@ -593,7 +610,7 @@ pub fn BTree(comptime config: Config) type {
 
         /// Deallocates all nodes in the tree, using stack space proportional to its height.
         pub fn clear(tree: *Tree, allocator: Allocator) void {
-            if (tree.root_) |r| deallocate(allocator, r);
+            if (tree.root_handle) |r| deallocate(allocator, r);
             tree.* = .{};
         }
 
@@ -655,7 +672,7 @@ pub fn BTree(comptime config: Config) type {
             if (node.header.parent == null) {
                 // this early return means that we never deallocate the root, even if it is
                 // empty after a deletion. we keep it pre-allocated and only free in clear()
-                assert(node.handle() == tree.root_);
+                assert(node.handle() == tree.root_handle);
                 return node;
             }
 
@@ -735,10 +752,10 @@ pub fn BTree(comptime config: Config) type {
 
                 // if the root just became empty, delete it and make the tree
                 // shallower by using the merged node as the new root
-                if (parent.handle() == tree.root_ and parent.header.slots_in_use == 0) {
+                if (parent.handle() == tree.root_handle and parent.header.slots_in_use == 0) {
                     allocator.destroy(parent);
-                    tree.root_ = left.handle();
-                    tree.root_.?.parent = null;
+                    tree.root_handle = left.handle();
+                    tree.root_handle.?.parent = null;
                 }
 
                 return left;
@@ -898,20 +915,20 @@ const NodeHeaderTemplate = packed struct {
     parent: ?*anyopaque = null,
 };
 comptime {
-    assert(@sizeOf(NodeHeaderTemplate) == 8 + @sizeOf(*anyopaque));
+    assert(@sizeOf(NodeHeaderTemplate) == 4 + 4 + @sizeOf(*anyopaque));
 }
 
-fn defaultSlotsPerNode(comptime Element: type) usize {
-    const leaf_bytes = 256; // <- chosen after a few experiments in the original D implementation
-    return @max(2, (leaf_bytes - @sizeOf(NodeHeaderTemplate)) / @sizeOf(Element));
+fn defaultSlotsPerNode(comptime Element: type, comptime slots_alignment: usize) usize {
+    const bytes = 4 * cache_line; // <- chosen empirically
+    return maxSlotsPerNode(Element, slots_alignment, bytes);
 }
 
-fn maxSlotsPerNode(comptime Element: type, comptime max_bytes: usize, comptime slots_alignment: usize) usize {
+fn maxSlotsPerNode(comptime Element: type, comptime slots_alignment: usize, comptime max_bytes: usize) usize {
     var begin: usize = 2;
     var end: usize = max_bytes;
     while (begin < end) {
         const n = begin + (end - begin) / 2;
-        const bytes = @sizeOf(InternalNodeTemplate(Element, n, slots_alignment));
+        const bytes = @sizeOf(InternalNodeTemplate(Element, slots_alignment, n));
         switch (math.order(bytes, max_bytes)) {
             .gt => end = n,
             .lt => begin = n,
@@ -921,9 +938,9 @@ fn maxSlotsPerNode(comptime Element: type, comptime max_bytes: usize, comptime s
     return begin;
 }
 
-fn InternalNodeTemplate(comptime Element: type, comptime n: usize, comptime slots_alignment: usize) type {
+fn InternalNodeTemplate(comptime Element: type, comptime slots_alignment: usize, comptime n: usize) type {
     return extern struct {
-        header: NodeHeaderTemplate,
+        header: NodeHeaderTemplate align(cache_line),
         children: [n + 1]?*NodeHeaderTemplate,
         slots: [n]Element align(slots_alignment),
     };

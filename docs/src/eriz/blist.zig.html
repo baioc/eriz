@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">    <title>blist.zig - source view</title>
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAPNJREFUeNpi/P//PwMlgOXHUjly9E0G4hwgZmQiQZMqEK8H4v9QzUEgQSaoADK+zhH9iAGL+C0gDoAaNg9mGLoLfgA1awK9hS9gzgJxA9RQBmQDrgMxJzRMGKE4HYj/Ial5A8QmQLwCJoBsgBYW2+TR1ChDaWt4LOBxKsi/VUh8XiD+gq4IVyzwQAMJBoKwacZlAB8Qf0bi96IZhtOAe1D6LpqaEiz6rmEzQAeIzwGxCJpieFqApo/vQKyJboAaEBsAsSEupwI1MwKjGBTVHOhegMX5UajYRqiBjMgYmj400cVh0XgTiKdC0zhJgJHS7AwQYABm9EAdCKrEfAAAAABJRU5ErkJggg=="/>
+    <style>
+      body{
+        font-family: system-ui, -apple-system, Roboto, "Segoe UI", sans-serif;
+        margin: 0;
+        line-height: 1.5;
+      }
+
+      pre > code {
+        display: block;
+        overflow: auto;
+        line-height: normal;
+        margin: 0em;
+      }
+      .tok-kw {
+          color: #333;
+          font-weight: bold;
+      }
+      .tok-str {
+          color: #d14;
+      }
+      .tok-builtin {
+          color: #005C7A;
+      }
+      .tok-comment {
+          color: #545454;
+          font-style: italic;
+      }
+      .tok-fn {
+          color: #900;
+          font-weight: bold;
+      }
+      .tok-null {
+          color: #005C5C;
+      }
+      .tok-number {
+          color: #005C5C;
+      }
+      .tok-type {
+          color: #458;
+          font-weight: bold;
+      }
+      pre {
+        counter-reset: line;
+      }
+      pre .line:before {
+        counter-increment: line;
+        content: counter(line);
+        display: inline-block;
+        padding-right: 1em;
+        width: 2em;
+        text-align: right;
+        color: #999;
+      }
+      
+      .line {
+        width: 100%;
+        display: inline-block;
+      }
+      .line:target {
+        border-top: 1px solid #ccc;
+        border-bottom: 1px solid #ccc;
+        background: #fafafa;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body{
+            background:#222;
+            color: #ccc;
+        }
+        pre > code {
+            color: #ccc;
+            background: #222;
+            border: unset;
+        }
+        .line:target {
+            border-top: 1px solid #444;
+            border-bottom: 1px solid #444;
+            background: #333;
+        }
+        .tok-kw {
+            color: #eee;
+        }
+        .tok-str {
+            color: #2e5;
+        }
+        .tok-builtin {
+            color: #ff894c;
+        }
+        .tok-comment {
+            color: #aa7;
+        }
+        .tok-fn {
+            color: #B1A0F8;
+        }
+        .tok-null {
+            color: #ff8080;
+        }
+        .tok-number {
+            color: #ff8080;
+        }
+        .tok-type {
+            color: #68f;
+        }
+      }
+    </style>
+</head>
+<body>
+<pre><code><span class="line" id="L1"><span class="tok-comment">//! Generic B-list data structure: a mutable list implemented with a B-tree.</span></span>
+<span class="line" id="L2"><span class="tok-comment">//!</span></span>
+<span class="line" id="L3"><span class="tok-comment">//! Zig's `std.ArrayList` is a dynamically-sized array, where insertions and deletions at the</span></span>
+<span class="line" id="L4"><span class="tok-comment">//! beginning or middle of the list require moving most of its elements in memory.</span></span>
+<span class="line" id="L5"><span class="tok-comment">//! This data structure should provide better performance when modifying large lists,</span></span>
+<span class="line" id="L6"><span class="tok-comment">//! since the B-tree's hybrid array/tree structure requires less moves on such operations.</span></span>
+<span class="line" id="L7"></span>
+<span class="line" id="L8"><span class="tok-kw">const</span> std = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;std&quot;</span>);</span>
+<span class="line" id="L9"><span class="tok-kw">const</span> mem = std.mem;</span>
+<span class="line" id="L10"><span class="tok-kw">const</span> testing = std.testing;</span>
+<span class="line" id="L11"><span class="tok-kw">const</span> Allocator = mem.Allocator;</span>
+<span class="line" id="L12"></span>
+<span class="line" id="L13"><span class="tok-kw">const</span> btree = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;btree.zig&quot;</span>);</span>
+<span class="line" id="L14"></span>
+<span class="line" id="L15"><span class="tok-comment">/// Static parameters used to generate a custom B-list. Refer to the `btree` documentation.</span></span>
+<span class="line" id="L16"><span class="tok-kw">pub</span> <span class="tok-kw">const</span> Config = <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L17">    Element: <span class="tok-type">type</span>,</span>
+<span class="line" id="L18">    slots_per_node: ?<span class="tok-type">usize</span> = <span class="tok-null">null</span>,</span>
+<span class="line" id="L19">    bytes_per_node: ?<span class="tok-type">usize</span> = <span class="tok-null">null</span>,</span>
+<span class="line" id="L20">};</span>
+<span class="line" id="L21"></span>
+<span class="line" id="L22"><span class="tok-comment">/// Generates a custom B-list with the given configuration.</span></span>
+<span class="line" id="L23"><span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">BList</span>(<span class="tok-kw">comptime</span> config: Config) <span class="tok-type">type</span> {</span>
+<span class="line" id="L24">    <span class="tok-kw">const</span> Element = config.Element;</span>
+<span class="line" id="L25">    <span class="tok-kw">const</span> BTree = btree.BTree(.{</span>
+<span class="line" id="L26">        .Element = Element,</span>
+<span class="line" id="L27">        .order_statistics = <span class="tok-null">true</span>,</span>
+<span class="line" id="L28">        .slots_per_node = config.slots_per_node,</span>
+<span class="line" id="L29">        .bytes_per_node = config.bytes_per_node,</span>
+<span class="line" id="L30">    });</span>
+<span class="line" id="L31"></span>
+<span class="line" id="L32">    <span class="tok-kw">return</span> <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L33">        <span class="tok-kw">const</span> Cursor = BTree.Cursor;</span>
+<span class="line" id="L34">        <span class="tok-kw">const</span> InsertError = BTree.InsertError;</span>
+<span class="line" id="L35"></span>
+<span class="line" id="L36">        b3: BTree = .{},</span>
+<span class="line" id="L37"></span>
+<span class="line" id="L38">        <span class="tok-kw">const</span> List = <span class="tok-builtin">@This</span>();</span>
+<span class="line" id="L39"></span>
+<span class="line" id="L40">        <span class="tok-comment">/// Returns the number of elements currently stored in the list, in constant time.</span></span>
+<span class="line" id="L41">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">len</span>(list: List) <span class="tok-type">usize</span> {</span>
+<span class="line" id="L42">            <span class="tok-kw">return</span> list.b3.len();</span>
+<span class="line" id="L43">        }</span>
+<span class="line" id="L44"></span>
+<span class="line" id="L45">        <span class="tok-comment">/// Looks up the N-th element in the list, or `null` if out of bounds.</span></span>
+<span class="line" id="L46">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">select</span>(list: List, index: <span class="tok-type">usize</span>) ?Cursor {</span>
+<span class="line" id="L47">            <span class="tok-kw">return</span> list.b3.select(index);</span>
+<span class="line" id="L48">        }</span>
+<span class="line" id="L49"></span>
+<span class="line" id="L50">        <span class="tok-comment">/// Inserts an element at the position specified by `select(i)` operation.</span></span>
+<span class="line" id="L51">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">insert</span>(</span>
+<span class="line" id="L52">            list: *List,</span>
+<span class="line" id="L53">            allocator: Allocator,</span>
+<span class="line" id="L54">            position: ?Cursor,</span>
+<span class="line" id="L55">            element: Element,</span>
+<span class="line" id="L56">        ) InsertError!Cursor {</span>
+<span class="line" id="L57">            <span class="tok-kw">return</span> list.b3.insertUnsorted(allocator, position, element);</span>
+<span class="line" id="L58">        }</span>
+<span class="line" id="L59"></span>
+<span class="line" id="L60">        <span class="tok-comment">/// Appends an element to the end of the list.</span></span>
+<span class="line" id="L61">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">append</span>(list: *List, allocator: Allocator, element: Element) InsertError!Cursor {</span>
+<span class="line" id="L62">            <span class="tok-kw">return</span> list.insert(allocator, <span class="tok-null">null</span>, element);</span>
+<span class="line" id="L63">        }</span>
+<span class="line" id="L64"></span>
+<span class="line" id="L65">        <span class="tok-comment">/// Clears the list using stack space logarithmic on the number of elements.</span></span>
+<span class="line" id="L66">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">clear</span>(list: *List, allocator: Allocator) <span class="tok-type">void</span> {</span>
+<span class="line" id="L67">            <span class="tok-kw">return</span> list.b3.clear(allocator);</span>
+<span class="line" id="L68">        }</span>
+<span class="line" id="L69"></span>
+<span class="line" id="L70">        <span class="tok-comment">/// Deletes the element referenced by the given cursor from the list.</span></span>
+<span class="line" id="L71">        <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">delete</span>(list: *List, allocator: Allocator, cursor: Cursor) <span class="tok-type">void</span> {</span>
+<span class="line" id="L72">            <span class="tok-kw">return</span> list.b3.delete(allocator, cursor);</span>
+<span class="line" id="L73">        }</span>
+<span class="line" id="L74">    };</span>
+<span class="line" id="L75">}</span>
+<span class="line" id="L76"></span>
+<span class="line" id="L77"><span class="tok-kw">test</span> <span class="tok-str">&quot;BList: mutable list operations&quot;</span> {</span>
+<span class="line" id="L78">    <span class="tok-kw">const</span> List = BList(.{ .Element = <span class="tok-type">i32</span> });</span>
+<span class="line" id="L79">    <span class="tok-kw">const</span> alloc = testing.allocator;</span>
+<span class="line" id="L80">    <span class="tok-kw">var</span> numbers = List{};</span>
+<span class="line" id="L81">    <span class="tok-kw">defer</span> numbers.clear(alloc);</span>
+<span class="line" id="L82"></span>
+<span class="line" id="L83">    <span class="tok-kw">const</span> payload = [_]<span class="tok-type">i32</span>{ -<span class="tok-number">6</span>, <span class="tok-number">0</span>, <span class="tok-number">2</span>, <span class="tok-number">3</span>, <span class="tok-number">6</span>, <span class="tok-number">7</span>, <span class="tok-number">11</span> };</span>
+<span class="line" id="L84">    <span class="tok-kw">const</span> n = payload.len;</span>
+<span class="line" id="L85"></span>
+<span class="line" id="L86">    <span class="tok-comment">// initially, size should be 0</span>
+</span>
+<span class="line" id="L87">    <span class="tok-kw">try</span> testing.expectEqual(<span class="tok-builtin">@as</span>(<span class="tok-type">usize</span>, <span class="tok-number">0</span>), numbers.len());</span>
+<span class="line" id="L88"></span>
+<span class="line" id="L89">    <span class="tok-comment">// push numbers in order</span>
+</span>
+<span class="line" id="L90">    <span class="tok-kw">for</span> (payload) |element| {</span>
+<span class="line" id="L91">        <span class="tok-kw">const</span> cursor = <span class="tok-kw">try</span> numbers.append(alloc, element);</span>
+<span class="line" id="L92">        <span class="tok-kw">try</span> testing.expectEqual(element, cursor.get().*);</span>
+<span class="line" id="L93">    }</span>
+<span class="line" id="L94"></span>
+<span class="line" id="L95">    <span class="tok-comment">// len should be the same as in payload</span>
+</span>
+<span class="line" id="L96">    <span class="tok-kw">try</span> testing.expectEqual(n, numbers.len());</span>
+<span class="line" id="L97"></span>
+<span class="line" id="L98">    <span class="tok-comment">// check if the list's front is the expected value, then pop it and repeat</span>
+</span>
+<span class="line" id="L99">    <span class="tok-kw">for</span> (<span class="tok-number">0</span>..n) |j| {</span>
+<span class="line" id="L100">        <span class="tok-kw">const</span> front = numbers.select(<span class="tok-number">0</span>);</span>
+<span class="line" id="L101">        <span class="tok-kw">try</span> testing.expect(front != <span class="tok-null">null</span>);</span>
+<span class="line" id="L102">        <span class="tok-kw">try</span> testing.expectEqual(payload[j], front.?.get().*);</span>
+<span class="line" id="L103">        numbers.delete(alloc, front.?);</span>
+<span class="line" id="L104">    }</span>
+<span class="line" id="L105"></span>
+<span class="line" id="L106">    <span class="tok-comment">// after removals, size should be zero</span>
+</span>
+<span class="line" id="L107">    <span class="tok-kw">try</span> testing.expectEqual(<span class="tok-builtin">@as</span>(<span class="tok-type">usize</span>, <span class="tok-number">0</span>), numbers.len());</span>
+<span class="line" id="L108">}</span>
+<span class="line" id="L109"></span>
+</code></pre></body>
+</html>

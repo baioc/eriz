@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">    <title>eriz.zig - source view</title>
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAPNJREFUeNpi/P//PwMlgOXHUjly9E0G4hwgZmQiQZMqEK8H4v9QzUEgQSaoADK+zhH9iAGL+C0gDoAaNg9mGLoLfgA1awK9hS9gzgJxA9RQBmQDrgMxJzRMGKE4HYj/Ial5A8QmQLwCJoBsgBYW2+TR1ChDaWt4LOBxKsi/VUh8XiD+gq4IVyzwQAMJBoKwacZlAB8Qf0bi96IZhtOAe1D6LpqaEiz6rmEzQAeIzwGxCJpieFqApo/vQKyJboAaEBsAsSEupwI1MwKjGBTVHOhegMX5UajYRqiBjMgYmj400cVh0XgTiKdC0zhJgJHS7AwQYABm9EAdCKrEfAAAAABJRU5ErkJggg=="/>
+    <style>
+      body{
+        font-family: system-ui, -apple-system, Roboto, "Segoe UI", sans-serif;
+        margin: 0;
+        line-height: 1.5;
+      }
+
+      pre > code {
+        display: block;
+        overflow: auto;
+        line-height: normal;
+        margin: 0em;
+      }
+      .tok-kw {
+          color: #333;
+          font-weight: bold;
+      }
+      .tok-str {
+          color: #d14;
+      }
+      .tok-builtin {
+          color: #005C7A;
+      }
+      .tok-comment {
+          color: #545454;
+          font-style: italic;
+      }
+      .tok-fn {
+          color: #900;
+          font-weight: bold;
+      }
+      .tok-null {
+          color: #005C5C;
+      }
+      .tok-number {
+          color: #005C5C;
+      }
+      .tok-type {
+          color: #458;
+          font-weight: bold;
+      }
+      pre {
+        counter-reset: line;
+      }
+      pre .line:before {
+        counter-increment: line;
+        content: counter(line);
+        display: inline-block;
+        padding-right: 1em;
+        width: 2em;
+        text-align: right;
+        color: #999;
+      }
+      
+      .line {
+        width: 100%;
+        display: inline-block;
+      }
+      .line:target {
+        border-top: 1px solid #ccc;
+        border-bottom: 1px solid #ccc;
+        background: #fafafa;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body{
+            background:#222;
+            color: #ccc;
+        }
+        pre > code {
+            color: #ccc;
+            background: #222;
+            border: unset;
+        }
+        .line:target {
+            border-top: 1px solid #444;
+            border-bottom: 1px solid #444;
+            background: #333;
+        }
+        .tok-kw {
+            color: #eee;
+        }
+        .tok-str {
+            color: #2e5;
+        }
+        .tok-builtin {
+            color: #ff894c;
+        }
+        .tok-comment {
+            color: #aa7;
+        }
+        .tok-fn {
+            color: #B1A0F8;
+        }
+        .tok-null {
+            color: #ff8080;
+        }
+        .tok-number {
+            color: #ff8080;
+        }
+        .tok-type {
+            color: #68f;
+        }
+      }
+    </style>
+</head>
+<body>
+<pre><code><span class="line" id="L1"><span class="tok-comment">//! Data structures and procedures ... with good documentation.</span></span>
+<span class="line" id="L2"></span>
+<span class="line" id="L3"><span class="tok-kw">const</span> std = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;std&quot;</span>);</span>
+<span class="line" id="L4"></span>
+<span class="line" id="L5"><span class="tok-kw">pub</span> <span class="tok-kw">const</span> btree = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;btree.zig&quot;</span>);</span>
+<span class="line" id="L6"><span class="tok-kw">pub</span> <span class="tok-kw">const</span> math = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;math.zig&quot;</span>);</span>
+<span class="line" id="L7"><span class="tok-kw">pub</span> <span class="tok-kw">const</span> blist = <span class="tok-builtin">@import</span>(<span class="tok-str">&quot;blist.zig&quot;</span>);</span>
+<span class="line" id="L8"></span>
+<span class="line" id="L9"><span class="tok-kw">test</span> {</span>
+<span class="line" id="L10">    std.testing.refAllDecls(btree);</span>
+<span class="line" id="L11">    std.testing.refAllDecls(math);</span>
+<span class="line" id="L12">    std.testing.refAllDecls(blist);</span>
+<span class="line" id="L13">}</span>
+<span class="line" id="L14"></span>
+<span class="line" id="L15"><span class="tok-kw">const</span> Allocator = std.mem.Allocator;</span>
+<span class="line" id="L16"><span class="tok-kw">const</span> Arena = std.heap.ArenaAllocator;</span>
+<span class="line" id="L17"><span class="tok-kw">const</span> Accumulator = math.Accumulator(<span class="tok-type">f64</span>);</span>
+<span class="line" id="L18"></span>
+<span class="line" id="L19"><span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">main</span>() !<span class="tok-type">void</span> {</span>
+<span class="line" id="L20">    <span class="tok-kw">var</span> gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = <span class="tok-null">false</span> }){};</span>
+<span class="line" id="L21">    <span class="tok-kw">const</span> alloc = gpa.allocator();</span>
+<span class="line" id="L22"></span>
+<span class="line" id="L23">    <span class="tok-kw">const</span> args = <span class="tok-kw">try</span> std.process.argsAlloc(alloc);</span>
+<span class="line" id="L24">    <span class="tok-kw">defer</span> std.process.argsFree(alloc, args);</span>
+<span class="line" id="L25"></span>
+<span class="line" id="L26">    <span class="tok-kw">if</span> (args.len &lt; <span class="tok-number">3</span>) <span class="tok-kw">return</span> <span class="tok-kw">error</span>.NotEnoughArgs;</span>
+<span class="line" id="L27">    <span class="tok-kw">if</span> (args.len &gt; <span class="tok-number">3</span>) <span class="tok-kw">return</span> <span class="tok-kw">error</span>.TooManyArgs;</span>
+<span class="line" id="L28">    <span class="tok-kw">const</span> element = args[<span class="tok-number">1</span>][<span class="tok-number">0</span>..args[<span class="tok-number">1</span>].len];</span>
+<span class="line" id="L29">    <span class="tok-kw">const</span> n = <span class="tok-kw">try</span> std.fmt.parseUnsigned(<span class="tok-type">u64</span>, args[<span class="tok-number">2</span>][<span class="tok-number">0</span>..args[<span class="tok-number">2</span>].len], <span class="tok-number">10</span>);</span>
+<span class="line" id="L30">    <span class="tok-kw">if</span> (n == <span class="tok-number">0</span>) <span class="tok-kw">return</span> <span class="tok-kw">error</span>.InvalidPayloadLength;</span>
+<span class="line" id="L31"></span>
+<span class="line" id="L32">    <span class="tok-kw">if</span> (std.mem.eql(<span class="tok-type">u8</span>, element, <span class="tok-str">&quot;int&quot;</span>)) {</span>
+<span class="line" id="L33">        <span class="tok-kw">return</span> setBenchmarks(BTree(<span class="tok-type">i32</span>, btree.AutoContext(<span class="tok-type">i32</span>)), <span class="tok-type">i32</span>, alloc, n);</span>
+<span class="line" id="L34">    } <span class="tok-kw">else</span> <span class="tok-kw">if</span> (std.mem.eql(<span class="tok-type">u8</span>, element, <span class="tok-str">&quot;String32&quot;</span>)) {</span>
+<span class="line" id="L35">        <span class="tok-kw">return</span> setBenchmarks(BTree([<span class="tok-number">32</span>]<span class="tok-type">u8</span>, String32Context), [<span class="tok-number">32</span>]<span class="tok-type">u8</span>, alloc, n);</span>
+<span class="line" id="L36">    } <span class="tok-kw">else</span> {</span>
+<span class="line" id="L37">        <span class="tok-kw">return</span> <span class="tok-kw">error</span>.InvalidElementType;</span>
+<span class="line" id="L38">    }</span>
+<span class="line" id="L39">}</span>
+<span class="line" id="L40"></span>
+<span class="line" id="L41"><span class="tok-kw">fn</span> <span class="tok-fn">BTree</span>(<span class="tok-kw">comptime</span> T: <span class="tok-type">type</span>, <span class="tok-kw">comptime</span> Context: <span class="tok-type">type</span>) <span class="tok-type">type</span> {</span>
+<span class="line" id="L42">    <span class="tok-kw">return</span> <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L43">        b3: btree.BTree(.{ .Element = T }),</span>
+<span class="line" id="L44">        ctx: Context,</span>
+<span class="line" id="L45">        alloc: Allocator,</span>
+<span class="line" id="L46"></span>
+<span class="line" id="L47">        <span class="tok-kw">const</span> Self = <span class="tok-builtin">@This</span>();</span>
+<span class="line" id="L48"></span>
+<span class="line" id="L49">        <span class="tok-kw">fn</span> <span class="tok-fn">init</span>(allocator: Allocator) Self {</span>
+<span class="line" id="L50">            <span class="tok-kw">return</span> .{ .b3 = .{}, .ctx = .{}, .alloc = allocator };</span>
+<span class="line" id="L51">        }</span>
+<span class="line" id="L52"></span>
+<span class="line" id="L53">        <span class="tok-kw">fn</span> <span class="tok-fn">len</span>(self: Self) <span class="tok-type">usize</span> {</span>
+<span class="line" id="L54">            <span class="tok-kw">return</span> self.b3.len();</span>
+<span class="line" id="L55">        }</span>
+<span class="line" id="L56"></span>
+<span class="line" id="L57">        <span class="tok-kw">fn</span> <span class="tok-fn">upsert</span>(self: *Self, x: T) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L58">            <span class="tok-kw">const</span> lookup = self.b3.lookup(x, self.ctx);</span>
+<span class="line" id="L59">            <span class="tok-kw">switch</span> (lookup) {</span>
+<span class="line" id="L60">                .found =&gt; |cursor| cursor.get().* = x,</span>
+<span class="line" id="L61">                .not_found =&gt; _ = <span class="tok-kw">try</span> self.b3.insert(self.alloc, lookup, x, self.ctx),</span>
+<span class="line" id="L62">            }</span>
+<span class="line" id="L63">        }</span>
+<span class="line" id="L64"></span>
+<span class="line" id="L65">        <span class="tok-kw">fn</span> <span class="tok-fn">contains</span>(self: Self, x: T) <span class="tok-type">bool</span> {</span>
+<span class="line" id="L66">            <span class="tok-kw">return</span> <span class="tok-kw">switch</span> (self.b3.lookup(x, self.ctx)) {</span>
+<span class="line" id="L67">                .found =&gt; <span class="tok-null">true</span>,</span>
+<span class="line" id="L68">                .not_found =&gt; <span class="tok-null">false</span>,</span>
+<span class="line" id="L69">            };</span>
+<span class="line" id="L70">        }</span>
+<span class="line" id="L71"></span>
+<span class="line" id="L72">        <span class="tok-kw">fn</span> <span class="tok-fn">remove</span>(self: *Self, x: T) <span class="tok-type">void</span> {</span>
+<span class="line" id="L73">            <span class="tok-kw">const</span> lookup = self.b3.lookup(x, self.ctx);</span>
+<span class="line" id="L74">            <span class="tok-kw">switch</span> (lookup) {</span>
+<span class="line" id="L75">                .found =&gt; |cursor| self.b3.delete(self.alloc, cursor),</span>
+<span class="line" id="L76">                .not_found =&gt; {},</span>
+<span class="line" id="L77">            }</span>
+<span class="line" id="L78">        }</span>
+<span class="line" id="L79">    };</span>
+<span class="line" id="L80">}</span>
+<span class="line" id="L81"></span>
+<span class="line" id="L82"><span class="tok-kw">const</span> String32Context = <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L83">    <span class="tok-kw">pub</span> <span class="tok-kw">fn</span> <span class="tok-fn">cmp</span>(_: <span class="tok-builtin">@This</span>(), lhs: [<span class="tok-number">32</span>]<span class="tok-type">u8</span>, rhs: [<span class="tok-number">32</span>]<span class="tok-type">u8</span>) std.math.Order {</span>
+<span class="line" id="L84">        <span class="tok-kw">for</span> (<span class="tok-number">0</span>..lhs.len) |i| {</span>
+<span class="line" id="L85">            <span class="tok-kw">if</span> (lhs[i] &lt; rhs[i]) <span class="tok-kw">return</span> .lt;</span>
+<span class="line" id="L86">            <span class="tok-kw">if</span> (lhs[i] &gt; rhs[i]) <span class="tok-kw">return</span> .gt;</span>
+<span class="line" id="L87">        }</span>
+<span class="line" id="L88">        <span class="tok-kw">return</span> .eq;</span>
+<span class="line" id="L89">    }</span>
+<span class="line" id="L90">};</span>
+<span class="line" id="L91"></span>
+<span class="line" id="L92"><span class="tok-kw">fn</span> <span class="tok-fn">randomize</span>(<span class="tok-kw">comptime</span> T: <span class="tok-type">type</span>, random: *std.rand.Random, output: *T) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L93">    <span class="tok-kw">if</span> (T == <span class="tok-type">i32</span>) {</span>
+<span class="line" id="L94">        output.* = random.int(<span class="tok-type">i32</span>);</span>
+<span class="line" id="L95">    } <span class="tok-kw">else</span> <span class="tok-kw">if</span> (T == [<span class="tok-number">32</span>]<span class="tok-type">u8</span>) {</span>
+<span class="line" id="L96">        random.bytes(output);</span>
+<span class="line" id="L97">    } <span class="tok-kw">else</span> {</span>
+<span class="line" id="L98">        <span class="tok-builtin">@compileError</span>(<span class="tok-str">&quot;randomize not implemented for type &quot;</span> ++ <span class="tok-builtin">@typeName</span>(T));</span>
+<span class="line" id="L99">    }</span>
+<span class="line" id="L100">}</span>
+<span class="line" id="L101"></span>
+<span class="line" id="L102"><span class="tok-kw">fn</span> <span class="tok-fn">benchmark</span>(repetitions: <span class="tok-type">u32</span>, context: <span class="tok-kw">anytype</span>) !Accumulator {</span>
+<span class="line" id="L103">    <span class="tok-kw">var</span> acc = Accumulator{};</span>
+<span class="line" id="L104">    <span class="tok-kw">for</span> (<span class="tok-number">0</span>..repetitions) |_| {</span>
+<span class="line" id="L105">        <span class="tok-kw">var</span> begin: <span class="tok-type">i128</span> = <span class="tok-null">undefined</span>;</span>
+<span class="line" id="L106">        <span class="tok-kw">var</span> end: <span class="tok-type">i128</span> = <span class="tok-null">undefined</span>;</span>
+<span class="line" id="L107">        <span class="tok-kw">try</span> context.code(&amp;begin, &amp;end);</span>
+<span class="line" id="L108">        <span class="tok-kw">const</span> elapsed_micros = <span class="tok-builtin">@as</span>(<span class="tok-type">f64</span>, <span class="tok-builtin">@floatFromInt</span>(end - begin)) / <span class="tok-number">1e3</span>;</span>
+<span class="line" id="L109">        acc.add(elapsed_micros);</span>
+<span class="line" id="L110">    }</span>
+<span class="line" id="L111">    <span class="tok-kw">return</span> acc;</span>
+<span class="line" id="L112">}</span>
+<span class="line" id="L113"></span>
+<span class="line" id="L114"><span class="tok-kw">fn</span> <span class="tok-fn">setBenchmarks</span>(<span class="tok-kw">comptime</span> Set: <span class="tok-type">type</span>, <span class="tok-kw">comptime</span> Element: <span class="tok-type">type</span>, allocator: Allocator, n: <span class="tok-type">u64</span>) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L115">    <span class="tok-kw">const</span> element_name = <span class="tok-builtin">@typeName</span>(Element);</span>
+<span class="line" id="L116"></span>
+<span class="line" id="L117">    <span class="tok-kw">const</span> n2 = n * <span class="tok-number">2</span>;</span>
+<span class="line" id="L118">    <span class="tok-kw">const</span> n_for_30_reps = <span class="tok-number">32_768</span>;</span>
+<span class="line" id="L119">    <span class="tok-kw">const</span> repetitions: <span class="tok-type">u32</span> = <span class="tok-builtin">@intCast</span>(<span class="tok-builtin">@max</span>(<span class="tok-number">30</span>, <span class="tok-number">30</span> * n_for_30_reps / n));</span>
+<span class="line" id="L120"></span>
+<span class="line" id="L121">    <span class="tok-kw">const</span> buffer = <span class="tok-kw">try</span> allocator.alloc(Element, n2);</span>
+<span class="line" id="L122">    <span class="tok-kw">defer</span> allocator.free(buffer);</span>
+<span class="line" id="L123"></span>
+<span class="line" id="L124">    <span class="tok-kw">const</span> random_seed = <span class="tok-number">0</span>;</span>
+<span class="line" id="L125">    <span class="tok-kw">var</span> prng = std.rand.DefaultPrng.init(random_seed);</span>
+<span class="line" id="L126">    <span class="tok-kw">var</span> random = prng.random();</span>
+<span class="line" id="L127">    <span class="tok-kw">for</span> (buffer) |*x| <span class="tok-kw">try</span> randomize(Element, &amp;random, x);</span>
+<span class="line" id="L128">    <span class="tok-kw">const</span> xs = buffer[<span class="tok-number">0</span>..n];</span>
+<span class="line" id="L129">    <span class="tok-kw">const</span> xs2 = buffer[<span class="tok-number">0</span>..n2];</span>
+<span class="line" id="L130"></span>
+<span class="line" id="L131">    <span class="tok-kw">var</span> arena = Arena.init(allocator);</span>
+<span class="line" id="L132">    <span class="tok-kw">defer</span> arena.deinit();</span>
+<span class="line" id="L133"></span>
+<span class="line" id="L134">    <span class="tok-kw">const</span> upsert = <span class="tok-kw">try</span> benchmark(</span>
+<span class="line" id="L135">        repetitions,</span>
+<span class="line" id="L136">        <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L137">            xs: []<span class="tok-kw">const</span> Element,</span>
+<span class="line" id="L138">            arena: *Arena,</span>
+<span class="line" id="L139">            <span class="tok-kw">fn</span> <span class="tok-fn">code</span>(self: <span class="tok-builtin">@This</span>(), begin: *<span class="tok-type">i128</span>, end: *<span class="tok-type">i128</span>) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L140">                <span class="tok-kw">var</span> set = Set.init(self.arena.allocator());</span>
+<span class="line" id="L141">                <span class="tok-kw">defer</span> _ = self.arena.reset(.{ .retain_capacity = {} });</span>
+<span class="line" id="L142"></span>
+<span class="line" id="L143">                begin.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L144">                <span class="tok-kw">for</span> (self.xs) |x| <span class="tok-kw">try</span> set.upsert(x);</span>
+<span class="line" id="L145">                end.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L146">            }</span>
+<span class="line" id="L147">        }{ .xs = xs, .arena = &amp;arena },</span>
+<span class="line" id="L148">    );</span>
+<span class="line" id="L149">    <span class="tok-kw">try</span> printBenchmark(element_name, <span class="tok-str">&quot;upsert&quot;</span>, n, repetitions, upsert);</span>
+<span class="line" id="L150"></span>
+<span class="line" id="L151">    <span class="tok-kw">const</span> lookup_find = <span class="tok-kw">try</span> benchmark(</span>
+<span class="line" id="L152">        repetitions,</span>
+<span class="line" id="L153">        <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L154">            xs: []<span class="tok-kw">const</span> Element,</span>
+<span class="line" id="L155">            arena: *Arena,</span>
+<span class="line" id="L156">            <span class="tok-kw">fn</span> <span class="tok-fn">code</span>(self: <span class="tok-builtin">@This</span>(), begin: *<span class="tok-type">i128</span>, end: *<span class="tok-type">i128</span>) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L157">                <span class="tok-kw">var</span> set = Set.init(self.arena.allocator());</span>
+<span class="line" id="L158">                <span class="tok-kw">defer</span> _ = self.arena.reset(.{ .retain_capacity = {} });</span>
+<span class="line" id="L159"></span>
+<span class="line" id="L160">                <span class="tok-kw">for</span> (self.xs) |x| <span class="tok-kw">try</span> set.upsert(x);</span>
+<span class="line" id="L161"></span>
+<span class="line" id="L162">                begin.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L163">                <span class="tok-kw">for</span> (self.xs) |x| {</span>
+<span class="line" id="L164">                    <span class="tok-kw">if</span> (!set.contains(x)) <span class="tok-kw">return</span> <span class="tok-kw">error</span>.NotFound;</span>
+<span class="line" id="L165">                }</span>
+<span class="line" id="L166">                end.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L167">            }</span>
+<span class="line" id="L168">        }{ .xs = xs, .arena = &amp;arena },</span>
+<span class="line" id="L169">    );</span>
+<span class="line" id="L170">    <span class="tok-kw">try</span> printBenchmark(element_name, <span class="tok-str">&quot;lookupFind&quot;</span>, n, repetitions, lookup_find);</span>
+<span class="line" id="L171"></span>
+<span class="line" id="L172">    <span class="tok-kw">const</span> remove = <span class="tok-kw">try</span> benchmark(</span>
+<span class="line" id="L173">        repetitions,</span>
+<span class="line" id="L174">        <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L175">            xs: []<span class="tok-kw">const</span> Element,</span>
+<span class="line" id="L176">            arena: *Arena,</span>
+<span class="line" id="L177">            <span class="tok-kw">fn</span> <span class="tok-fn">code</span>(self: <span class="tok-builtin">@This</span>(), begin: *<span class="tok-type">i128</span>, end: *<span class="tok-type">i128</span>) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L178">                <span class="tok-kw">var</span> set = Set.init(self.arena.allocator());</span>
+<span class="line" id="L179">                <span class="tok-kw">defer</span> _ = self.arena.reset(.{ .retain_capacity = {} });</span>
+<span class="line" id="L180"></span>
+<span class="line" id="L181">                <span class="tok-kw">for</span> (self.xs) |x| <span class="tok-kw">try</span> set.upsert(x);</span>
+<span class="line" id="L182"></span>
+<span class="line" id="L183">                begin.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L184">                <span class="tok-kw">for</span> (self.xs) |x| set.remove(x);</span>
+<span class="line" id="L185">                end.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L186">            }</span>
+<span class="line" id="L187">        }{ .xs = xs, .arena = &amp;arena },</span>
+<span class="line" id="L188">    );</span>
+<span class="line" id="L189">    <span class="tok-kw">try</span> printBenchmark(element_name, <span class="tok-str">&quot;remove&quot;</span>, n, repetitions, remove);</span>
+<span class="line" id="L190"></span>
+<span class="line" id="L191">    <span class="tok-kw">const</span> lookup_fail = <span class="tok-kw">try</span> benchmark(repetitions, <span class="tok-kw">struct</span> {</span>
+<span class="line" id="L192">        xs: []<span class="tok-kw">const</span> Element,</span>
+<span class="line" id="L193">        xs2: []<span class="tok-kw">const</span> Element,</span>
+<span class="line" id="L194">        arena: *Arena,</span>
+<span class="line" id="L195">        <span class="tok-kw">fn</span> <span class="tok-fn">code</span>(self: <span class="tok-builtin">@This</span>(), begin: *<span class="tok-type">i128</span>, end: *<span class="tok-type">i128</span>) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L196">            <span class="tok-kw">var</span> set = Set.init(self.arena.allocator());</span>
+<span class="line" id="L197">            <span class="tok-kw">defer</span> _ = self.arena.reset(.{ .retain_capacity = {} });</span>
+<span class="line" id="L198"></span>
+<span class="line" id="L199">            <span class="tok-kw">for</span> (self.xs2) |x| <span class="tok-kw">try</span> set.upsert(x);</span>
+<span class="line" id="L200"></span>
+<span class="line" id="L201">            <span class="tok-kw">for</span> (self.xs) |x| set.remove(x);</span>
+<span class="line" id="L202"></span>
+<span class="line" id="L203">            begin.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L204">            <span class="tok-kw">for</span> (self.xs) |x| {</span>
+<span class="line" id="L205">                <span class="tok-kw">if</span> (set.contains(x)) <span class="tok-kw">return</span> <span class="tok-kw">error</span>.Found;</span>
+<span class="line" id="L206">            }</span>
+<span class="line" id="L207">            end.* = std.time.nanoTimestamp();</span>
+<span class="line" id="L208">        }</span>
+<span class="line" id="L209">    }{ .xs = xs, .xs2 = xs2, .arena = &amp;arena });</span>
+<span class="line" id="L210">    <span class="tok-kw">try</span> printBenchmark(element_name, <span class="tok-str">&quot;lookupFail&quot;</span>, n, repetitions, lookup_fail);</span>
+<span class="line" id="L211">}</span>
+<span class="line" id="L212"></span>
+<span class="line" id="L213"><span class="tok-kw">fn</span> <span class="tok-fn">printBenchmark</span>(</span>
+<span class="line" id="L214">    <span class="tok-kw">comptime</span> element: []<span class="tok-kw">const</span> <span class="tok-type">u8</span>,</span>
+<span class="line" id="L215">    <span class="tok-kw">comptime</span> operation: []<span class="tok-kw">const</span> <span class="tok-type">u8</span>,</span>
+<span class="line" id="L216">    n: <span class="tok-type">usize</span>,</span>
+<span class="line" id="L217">    reps: <span class="tok-type">u32</span>,</span>
+<span class="line" id="L218">    op: Accumulator,</span>
+<span class="line" id="L219">) !<span class="tok-type">void</span> {</span>
+<span class="line" id="L220">    <span class="tok-kw">const</span> stdout = std.io.getStdOut().writer();</span>
+<span class="line" id="L221">    <span class="tok-kw">const</span> fmt = <span class="tok-kw">comptime</span> <span class="tok-str">&quot;T=&quot;</span> ++ element ++ <span class="tok-str">&quot;\tOP=&quot;</span> ++ operation ++</span>
+<span class="line" id="L222">        <span class="tok-str">&quot;\tn={d}&quot;</span> ++</span>
+<span class="line" id="L223">        <span class="tok-str">&quot;\treps={d}&quot;</span> ++</span>
+<span class="line" id="L224">        <span class="tok-str">&quot;\tzmin={d:.3}&quot;</span> ++</span>
+<span class="line" id="L225">        <span class="tok-str">&quot;\tzmax={d:.3}&quot;</span> ++</span>
+<span class="line" id="L226">        <span class="tok-str">&quot;\ttime={d:.3}\n&quot;</span>;</span>
+<span class="line" id="L227">    <span class="tok-kw">const</span> avg = op.mean();</span>
+<span class="line" id="L228">    <span class="tok-kw">const</span> stddev = <span class="tok-builtin">@sqrt</span>(op.variance());</span>
+<span class="line" id="L229">    <span class="tok-kw">const</span> z_min = (op.min() - avg) / stddev;</span>
+<span class="line" id="L230">    <span class="tok-kw">const</span> z_max = (op.max() - avg) / stddev;</span>
+<span class="line" id="L231">    <span class="tok-kw">const</span> nanos_per_op = op.min() * <span class="tok-number">1e3</span> / <span class="tok-builtin">@as</span>(<span class="tok-type">f64</span>, <span class="tok-builtin">@floatFromInt</span>(n));</span>
+<span class="line" id="L232">    <span class="tok-kw">try</span> stdout.print(fmt, .{ n, reps, z_min, z_max, nanos_per_op });</span>
+<span class="line" id="L233">}</span>
+<span class="line" id="L234"></span>
+</code></pre></body>
+</html>

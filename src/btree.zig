@@ -157,15 +157,15 @@ pub fn BTree(comptime config: Config) type {
             parent: ?*InternalNode = null,
 
             fn asInternal(node: NodeHandle) ?*InternalNode {
-                if (!node.is_internal) return null;
                 comptime assert(@offsetOf(InternalNode, "header") == 0);
-                return @alignCast(@ptrCast(node));
+                const internal: *InternalNode = @alignCast(@ptrCast(node));
+                return if (node.is_internal) internal else null;
             }
 
             fn asExternal(node: NodeHandle) ?*ExternalNode {
-                if (node.is_internal) return null;
                 comptime assert(@offsetOf(ExternalNode, "header") == 0);
-                return @alignCast(@ptrCast(node));
+                const external: *ExternalNode = @alignCast(@ptrCast(node));
+                return if (node.is_internal) null else external;
             }
         };
         comptime {
@@ -193,8 +193,9 @@ pub fn BTree(comptime config: Config) type {
                     return &node.slots[cursor.index];
                 } else if (cursor.node.asInternal()) |node| {
                     return &node.slots[cursor.index];
+                } else {
+                    unreachable;
                 }
-                unreachable;
             }
 
             /// Tries to move the cursor to the next element in the tree and get its address.
@@ -464,8 +465,9 @@ pub fn BTree(comptime config: Config) type {
                         const leaf = node.asExternal().?;
                         const search = bisect(element, &leaf.slots, leaf.header.slots_in_use, context);
                         break :blk .{ .node = leaf, .index = search.index };
+                    } else {
+                        unreachable;
                     }
-                    unreachable;
                 },
             };
 

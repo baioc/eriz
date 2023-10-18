@@ -10,15 +10,12 @@ test {
     std.testing.refAllDecls(math);
 }
 
-const stdlib = @cImport({
-    @cInclude("stdlib.h");
-    @cInclude("stdio.h");
-});
 const Allocator = std.mem.Allocator;
+const Arena = std.heap.ArenaAllocator;
 const Accumulator = math.Accumulator(f64);
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false }){};
     const alloc = gpa.allocator();
 
     const args = try std.process.argsAlloc(alloc);
@@ -29,18 +26,42 @@ pub fn main() !void {
     const n = try std.fmt.parseUnsigned(u64, args[2][0..args[2].len], 10);
     if (n == 0) return error.InvalidPayloadLength;
 
+    const order = if (args.len >= 4)
+        try std.fmt.parseUnsigned(u16, args[3][0..args[3].len], 10)
+    else
+        0;
+
+    if (args.len > 4) return error.TooManyArgs;
+
     if (std.mem.eql(u8, element, "int")) {
-        return setBenchmarks(BTree(i32, btree.AutoContext(i32)), i32, alloc, n);
+        const Context = btree.AutoContext(i32);
+        return switch (order) {
+            8 => setBenchmarks(BTree(i32, 8, Context), i32, alloc, n),
+            16 => setBenchmarks(BTree(i32, 16, Context), i32, alloc, n),
+            32 => setBenchmarks(BTree(i32, 32, Context), i32, alloc, n),
+            64 => setBenchmarks(BTree(i32, 64, Context), i32, alloc, n),
+            128 => setBenchmarks(BTree(i32, 128, Context), i32, alloc, n),
+            else => error.InvalidBTreeOrder,
+        };
     } else if (std.mem.eql(u8, element, "String32")) {
-        return setBenchmarks(BTree([32]u8, String32Context), [32]u8, alloc, n);
+        return switch (order) {
+            8 => setBenchmarks(BTree([32]u8, 8, String32Context), [32]u8, alloc, n),
+            16 => setBenchmarks(BTree([32]u8, 16, String32Context), [32]u8, alloc, n),
+            32 => setBenchmarks(BTree([32]u8, 32, String32Context), [32]u8, alloc, n),
+            64 => setBenchmarks(BTree([32]u8, 64, String32Context), [32]u8, alloc, n),
+            128 => setBenchmarks(BTree([32]u8, 128, String32Context), [32]u8, alloc, n),
+            else => error.InvalidBTreeOrder,
+        };
     } else {
         return error.InvalidElementType;
     }
 }
 
-fn BTree(comptime T: type, comptime Context: type) type {
+fn BTree(comptime T: type, comptime order_: usize, comptime Context: type) type {
     return struct {
-        b3: btree.BTree(.{ .Element = T }),
+        const order = order_;
+
+        b3: btree.BTree(.{ .Element = T, .slots_per_node = order }),
         ctx: Context,
         alloc: Allocator,
 
@@ -48,10 +69,6 @@ fn BTree(comptime T: type, comptime Context: type) type {
 
         fn init(allocator: Allocator) Self {
             return .{ .b3 = .{}, .ctx = .{}, .alloc = allocator };
-        }
-
-        fn deinit(self: *Self) void {
-            self.b3.clear(self.alloc);
         }
 
         fn len(self: Self) usize {
@@ -93,123 +110,149 @@ const String32Context = struct {
     }
 };
 
-fn randomize(comptime T: type, output: *T) !void {
+fn randomize(comptime T: type, random: *std.rand.Random, output: *T) !void {
     if (T == i32) {
-        output.* = stdlib.rand();
+        output.* = random.int(i32);
     } else if (T == [32]u8) {
-        _ = stdlib.snprintf(output.ptr, output.len, "%031d", stdlib.rand());
+        random.bytes(output);
     } else {
         @compileError("randomize not implemented for type " ++ @typeName(T));
     }
 }
 
-fn benchmark(context: anytype) !Accumulator {
+fn benchmark(repetitions: u32, context: anytype) !Accumulator {
     var acc = Accumulator{};
-    for (0..30) |_| {
-        var begin: i64 = undefined;
-        var end: i64 = undefined;
+    for (0..repetitions) |_| {
+        var begin: i128 = undefined;
+        var end: i128 = undefined;
         try context.code(&begin, &end);
-        const elapsed = end - begin;
-        acc.add(@floatFromInt(elapsed));
+        const elapsed_micros = @as(f64, @floatFromInt(end - begin)) / 1e3;
+        acc.add(elapsed_micros);
     }
     return acc;
 }
 
 fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocator, n: u64) !void {
+    const b = Set.order;
+    const element_name = @typeName(Element);
+
     const n2 = n * 2;
+    const n_for_30_reps = 32_768;
+    const repetitions: u32 = @intCast(@max(30, 30 * n_for_30_reps / n));
 
     const buffer = try allocator.alloc(Element, n2);
     defer allocator.free(buffer);
 
-    stdlib.srand(0);
-    for (buffer) |*x| try randomize(Element, x);
-
+    const random_seed = 0;
+    var prng = std.rand.DefaultPrng.init(random_seed);
+    var random = prng.random();
+    for (buffer) |*x| try randomize(Element, &random, x);
     const xs = buffer[0..n];
     const xs2 = buffer[0..n2];
 
+    var arena = Arena.init(allocator);
+    defer arena.deinit();
+
     const upsert = try benchmark(
+        repetitions,
         struct {
             xs: []const Element,
-            allocator: Allocator,
-            fn code(self: @This(), begin: *i64, end: *i64) !void {
-                var set = Set.init(self.allocator);
-                defer set.deinit();
-                begin.* = std.time.microTimestamp();
+            arena: *Arena,
+            fn code(self: @This(), begin: *i128, end: *i128) !void {
+                var set = Set.init(self.arena.allocator());
+                defer _ = self.arena.reset(.{ .retain_capacity = {} });
+
+                begin.* = std.time.nanoTimestamp();
                 for (self.xs) |x| try set.upsert(x);
-                end.* = std.time.microTimestamp();
+                end.* = std.time.nanoTimestamp();
             }
-        }{ .xs = xs, .allocator = allocator },
+        }{ .xs = xs, .arena = &arena },
     );
+    try printBenchmark(b, element_name, "upsert", n, repetitions, upsert);
 
     const lookup_find = try benchmark(
+        repetitions,
         struct {
             xs: []const Element,
-            allocator: Allocator,
-            fn code(self: @This(), begin: *i64, end: *i64) !void {
-                var set = Set.init(self.allocator);
-                defer set.deinit();
+            arena: *Arena,
+            fn code(self: @This(), begin: *i128, end: *i128) !void {
+                var set = Set.init(self.arena.allocator());
+                defer _ = self.arena.reset(.{ .retain_capacity = {} });
+
                 for (self.xs) |x| try set.upsert(x);
-                begin.* = std.time.microTimestamp();
+
+                begin.* = std.time.nanoTimestamp();
                 for (self.xs) |x| {
                     if (!set.contains(x)) return error.NotFound;
                 }
-                end.* = std.time.microTimestamp();
+                end.* = std.time.nanoTimestamp();
             }
-        }{ .xs = xs, .allocator = allocator },
+        }{ .xs = xs, .arena = &arena },
     );
+    try printBenchmark(b, element_name, "lookupFind", n, repetitions, lookup_find);
 
-    var rss: usize = 0;
-    const lookup_fail = try benchmark(struct {
+    const remove = try benchmark(
+        repetitions,
+        struct {
+            xs: []const Element,
+            arena: *Arena,
+            fn code(self: @This(), begin: *i128, end: *i128) !void {
+                var set = Set.init(self.arena.allocator());
+                defer _ = self.arena.reset(.{ .retain_capacity = {} });
+
+                for (self.xs) |x| try set.upsert(x);
+
+                begin.* = std.time.nanoTimestamp();
+                for (self.xs) |x| set.remove(x);
+                end.* = std.time.nanoTimestamp();
+            }
+        }{ .xs = xs, .arena = &arena },
+    );
+    try printBenchmark(b, element_name, "remove", n, repetitions, remove);
+
+    const lookup_fail = try benchmark(repetitions, struct {
         xs: []const Element,
         xs2: []const Element,
-        allocator: Allocator,
-        rss: *usize,
-        fn code(self: @This(), begin: *i64, end: *i64) !void {
-            var set = Set.init(self.allocator);
-            defer set.deinit();
+        arena: *Arena,
+        fn code(self: @This(), begin: *i128, end: *i128) !void {
+            var set = Set.init(self.arena.allocator());
+            defer _ = self.arena.reset(.{ .retain_capacity = {} });
+
             for (self.xs2) |x| try set.upsert(x);
-            self.rss.* = @max(self.rss.*, set.len());
+
             for (self.xs) |x| set.remove(x);
-            begin.* = std.time.microTimestamp();
+
+            begin.* = std.time.nanoTimestamp();
             for (self.xs) |x| {
                 if (set.contains(x)) return error.Found;
             }
-            end.* = std.time.microTimestamp();
+            end.* = std.time.nanoTimestamp();
         }
-    }{ .xs = xs, .xs2 = xs2, .allocator = allocator, .rss = &rss });
-
-    const remove = try benchmark(
-        struct {
-            xs: []const Element,
-            allocator: Allocator,
-            fn code(self: @This(), begin: *i64, end: *i64) !void {
-                var set = Set.init(self.allocator);
-                defer set.deinit();
-                for (self.xs) |x| try set.upsert(x);
-                begin.* = std.time.microTimestamp();
-                for (self.xs) |x| set.remove(x);
-                end.* = std.time.microTimestamp();
-            }
-        }{ .xs = xs, .allocator = allocator },
-    );
-
-    try printBenchmark(@typeName(Element), "upsert", n, upsert, rss);
-    try printBenchmark(@typeName(Element), "lookupFind", n, lookup_find, rss);
-    try printBenchmark(@typeName(Element), "lookupFail", n, lookup_fail, rss);
-    try printBenchmark(@typeName(Element), "remove", n, remove, rss);
+    }{ .xs = xs, .xs2 = xs2, .arena = &arena });
+    try printBenchmark(b, element_name, "lookupFail", n, repetitions, lookup_fail);
 }
 
 fn printBenchmark(
+    comptime b: usize,
     comptime element: []const u8,
     comptime operation: []const u8,
     n: u64,
+    reps: u64,
     op: Accumulator,
-    rss: usize,
 ) !void {
     const stdout = std.io.getStdOut().writer();
-    const fmt = comptime "container=eriz.BTree" ++
-        "\telement=" ++ element ++
-        "\toperation=" ++ operation ++
-        "\tn={d}\tres={d}\tavg={d:.3}\tstd={d:.3}\tmin={d:.3}\tmax={d:.3}\n";
-    try stdout.print(fmt, .{ n, rss, op.mean(), @sqrt(op.variance()), op.min(), op.max() });
+    const fmt = comptime "B={d}" ++
+        "\tT=" ++ element ++
+        "\tOP=" ++ operation ++
+        "\tn={d}" ++
+        "\treps={d}" ++
+        "\tzmin={d:.3}" ++
+        "\tzmax={d:.3}" ++
+        "\ttime={d:.3}\n";
+    const avg = op.mean();
+    const stddev = @sqrt(op.variance());
+    const z_min = (op.min() - avg) / stddev;
+    const z_max = (op.max() - avg) / stddev;
+    const nanos_per_element = op.min() * 1e3 / @as(f64, @floatFromInt(n));
+    try stdout.print(fmt, .{ b, n, reps, z_min, z_max, nanos_per_element });
 }

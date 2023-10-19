@@ -629,8 +629,6 @@ pub fn BTree(comptime config: Config) type {
             }
         }
 
-        const min_load = slots_per_node / 2;
-
         /// Deletes the element referenced by the given cursor.
         ///
         /// **This operation may invalidate any existing `Cursor`s, including the given one**.
@@ -644,18 +642,18 @@ pub fn BTree(comptime config: Config) type {
                 return;
             }
 
-            // at leafs, do the unshift, then check for underflow
+            // at leafs, do the unshift, then check for underflow (free-at-empty)
             var leaf = cursor.node.asExternal().?;
             unshiftElement(&leaf.slots, cursor.index, leaf.header.slots_in_use);
             leaf.header.slots_in_use -= 1;
             tree.total_in_use -= 1;
-            if (leaf.header.slots_in_use >= min_load) return;
+            if (leaf.header.slots_in_use >= 1) return;
 
-            // on underflow, start rebalancing at the leaf
+            // start rebalancing bottom-up while there are overflows (merge-at-half)
             leaf = rebalanceLeaf(tree, allocator, leaf);
             var node = leaf.header.parent;
             while (node) |branch| {
-                if (branch.header.slots_in_use >= min_load) break;
+                if (branch.header.slots_in_use >= slots_per_node / 2) break;
                 const possiblyMerged = rebalanceBranch(tree, allocator, branch);
                 node = possiblyMerged.header.parent;
             }
@@ -670,7 +668,7 @@ pub fn BTree(comptime config: Config) type {
         }
 
         fn rebalanceImpl(comptime Node: type, tree: *Tree, allocator: Allocator, node: *Node) *Node {
-            assert(node.header.slots_in_use < min_load);
+            assert(existsAndHasSpare(Node, node) == null);
             if (node.header.parent == null) {
                 // this early return means that we never deallocate the root, even if it is
                 // empty after a deletion. we keep it pre-allocated and only free in clear()
@@ -766,6 +764,7 @@ pub fn BTree(comptime config: Config) type {
 
         fn existsAndHasSpare(comptime Node: type, node: ?*Node) ?*Node {
             if (node == null) return null;
+            const min_load = if (Node == ExternalNode) 1 else slots_per_node / 2;
             return if (node.?.header.slots_in_use > min_load) node.? else null;
         }
     };

@@ -22,46 +22,23 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     if (args.len < 3) return error.NotEnoughArgs;
+    if (args.len > 3) return error.TooManyArgs;
     const element = args[1][0..args[1].len];
     const n = try std.fmt.parseUnsigned(u64, args[2][0..args[2].len], 10);
     if (n == 0) return error.InvalidPayloadLength;
 
-    const order = if (args.len >= 4)
-        try std.fmt.parseUnsigned(u16, args[3][0..args[3].len], 10)
-    else
-        0;
-
-    if (args.len > 4) return error.TooManyArgs;
-
     if (std.mem.eql(u8, element, "int")) {
-        const Context = btree.AutoContext(i32);
-        return switch (order) {
-            8 => setBenchmarks(BTree(i32, 8, Context), i32, alloc, n),
-            16 => setBenchmarks(BTree(i32, 16, Context), i32, alloc, n),
-            32 => setBenchmarks(BTree(i32, 32, Context), i32, alloc, n),
-            64 => setBenchmarks(BTree(i32, 64, Context), i32, alloc, n),
-            128 => setBenchmarks(BTree(i32, 128, Context), i32, alloc, n),
-            else => error.InvalidBTreeOrder,
-        };
+        return setBenchmarks(BTree(i32, btree.AutoContext(i32)), i32, alloc, n);
     } else if (std.mem.eql(u8, element, "String32")) {
-        return switch (order) {
-            8 => setBenchmarks(BTree([32]u8, 8, String32Context), [32]u8, alloc, n),
-            16 => setBenchmarks(BTree([32]u8, 16, String32Context), [32]u8, alloc, n),
-            32 => setBenchmarks(BTree([32]u8, 32, String32Context), [32]u8, alloc, n),
-            64 => setBenchmarks(BTree([32]u8, 64, String32Context), [32]u8, alloc, n),
-            128 => setBenchmarks(BTree([32]u8, 128, String32Context), [32]u8, alloc, n),
-            else => error.InvalidBTreeOrder,
-        };
+        return setBenchmarks(BTree([32]u8, String32Context), [32]u8, alloc, n);
     } else {
         return error.InvalidElementType;
     }
 }
 
-fn BTree(comptime T: type, comptime order_: usize, comptime Context: type) type {
+fn BTree(comptime T: type, comptime Context: type) type {
     return struct {
-        const order = order_;
-
-        b3: btree.BTree(.{ .Element = T, .slots_per_node = order }),
+        b3: btree.BTree(.{ .Element = T }),
         ctx: Context,
         alloc: Allocator,
 
@@ -133,7 +110,6 @@ fn benchmark(repetitions: u32, context: anytype) !Accumulator {
 }
 
 fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocator, n: u64) !void {
-    const b = Set.order;
     const element_name = @typeName(Element);
 
     const n2 = n * 2;
@@ -168,7 +144,7 @@ fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocato
             }
         }{ .xs = xs, .arena = &arena },
     );
-    try printBenchmark(b, element_name, "upsert", n, repetitions, upsert);
+    try printBenchmark(element_name, "upsert", n, repetitions, upsert);
 
     const lookup_find = try benchmark(
         repetitions,
@@ -189,7 +165,7 @@ fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocato
             }
         }{ .xs = xs, .arena = &arena },
     );
-    try printBenchmark(b, element_name, "lookupFind", n, repetitions, lookup_find);
+    try printBenchmark(element_name, "lookupFind", n, repetitions, lookup_find);
 
     const remove = try benchmark(
         repetitions,
@@ -208,7 +184,7 @@ fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocato
             }
         }{ .xs = xs, .arena = &arena },
     );
-    try printBenchmark(b, element_name, "remove", n, repetitions, remove);
+    try printBenchmark(element_name, "remove", n, repetitions, remove);
 
     const lookup_fail = try benchmark(repetitions, struct {
         xs: []const Element,
@@ -229,21 +205,18 @@ fn setBenchmarks(comptime Set: type, comptime Element: type, allocator: Allocato
             end.* = std.time.nanoTimestamp();
         }
     }{ .xs = xs, .xs2 = xs2, .arena = &arena });
-    try printBenchmark(b, element_name, "lookupFail", n, repetitions, lookup_fail);
+    try printBenchmark(element_name, "lookupFail", n, repetitions, lookup_fail);
 }
 
 fn printBenchmark(
-    comptime b: usize,
     comptime element: []const u8,
     comptime operation: []const u8,
-    n: u64,
-    reps: u64,
+    n: usize,
+    reps: u32,
     op: Accumulator,
 ) !void {
     const stdout = std.io.getStdOut().writer();
-    const fmt = comptime "B={d}" ++
-        "\tT=" ++ element ++
-        "\tOP=" ++ operation ++
+    const fmt = comptime "T=" ++ element ++ "\tOP=" ++ operation ++
         "\tn={d}" ++
         "\treps={d}" ++
         "\tzmin={d:.3}" ++
@@ -253,6 +226,6 @@ fn printBenchmark(
     const stddev = @sqrt(op.variance());
     const z_min = (op.min() - avg) / stddev;
     const z_max = (op.max() - avg) / stddev;
-    const nanos_per_element = op.min() * 1e3 / @as(f64, @floatFromInt(n));
-    try stdout.print(fmt, .{ b, n, reps, z_min, z_max, nanos_per_element });
+    const nanos_per_op = op.min() * 1e3 / @as(f64, @floatFromInt(n));
+    try stdout.print(fmt, .{ n, reps, z_min, z_max, nanos_per_op });
 }

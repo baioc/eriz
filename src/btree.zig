@@ -53,6 +53,15 @@ pub const Config = struct {
     /// Otherwise, if both are set, this config just adds an upper bound to `slots_per_node`.
     bytes_per_node: ?usize = null,
 
+    /// If true, the B-tree will track the weight of its subtrees, enabling
+    /// [order statistic](https://en.wikipedia.org/wiki/Order_statistic_tree) operations.
+    ///
+    /// Since this increases the memory overhead of branch nodes and leads to extra writes
+    /// on tree updates, it is disabled by default.
+    ///
+    /// TODO: link to ops
+    order_statistics: bool = false,
+
     /// Overrides the default alignment of the array field containing each node's elements.
     /// Does not change the alignment of elements themselves.
     slots_alignment: ?usize = null,
@@ -82,6 +91,7 @@ pub fn BTree(comptime config: Config) type {
     if (config.bytes_per_node) |bytes| {
         if (bytes < cache_line) @compileError("nodes must have at least as many bytes as a cache line");
     }
+    const order_statistics = config.order_statistics;
 
     const min_align = @alignOf(Element);
     const simd_align = 16;
@@ -91,8 +101,10 @@ pub fn BTree(comptime config: Config) type {
     const n = blk: {
         const slots_per_node = xxx: {
             if (config.slots_per_node) |requested_slots| break :xxx requested_slots;
-            if (config.bytes_per_node) |bytes| break :xxx maxSlotsPerNode(Element, slots_alignment, bytes);
-            break :xxx defaultSlotsPerNode(Element, slots_alignment);
+            if (config.bytes_per_node) |bytes| {
+                break :xxx maxSlotsPerNode(Element, slots_alignment, bytes, order_statistics);
+            }
+            break :xxx defaultSlotsPerNode(Element, slots_alignment, order_statistics);
         };
 
         if (slots_per_node < 2) @compileError("B-tree nodes need at least 2 slots");
@@ -136,6 +148,7 @@ pub fn BTree(comptime config: Config) type {
         const InternalNode = extern struct {
             header: NodeHeader align(cache_line) = .{ .is_internal = true },
             children: [n + 1]?NodeHandle = [_]?NodeHandle{null} ** (n + 1),
+            weights: (if (order_statistics) [n + 1]usize else void) = undefined,
             slots: [n]Element align(slots_alignment) = undefined,
 
             fn handle(self: *InternalNode) NodeHandle {
@@ -143,7 +156,7 @@ pub fn BTree(comptime config: Config) type {
             }
         };
         comptime {
-            const Template = InternalNodeTemplate(Element, slots_alignment, n);
+            const Template = InternalNodeTemplate(Element, slots_alignment, n, order_statistics);
             assert(@sizeOf(InternalNode) == @sizeOf(Template));
         }
 
@@ -386,6 +399,40 @@ pub fn BTree(comptime config: Config) type {
             return if (search.found) .{ .found = cursor } else .{ .not_found = cursor };
         }
 
+        // TODO: docs
+        pub fn select(tree: Tree, rank: usize) ?Cursor {
+            if (!order_statistics) {
+                @compileError("`select` operation requires `order_statistics`");
+            } else {
+                if (rank >= tree.len()) return null;
+
+                var subtree_index = rank;
+                var node = tree.root_handle.?;
+
+                descent: while (node.asInternal()) |branch| {
+                    var accumulated: usize = 0;
+                    for (0..branch.header.slots_in_use + 1) |j| {
+                        assert(subtree_index >= accumulated);
+                        const weight = branch.weights[j];
+                        switch (math.order(subtree_index, accumulated + weight)) {
+                            .lt => {
+                                node = branch.children[j].?;
+                                subtree_index -= accumulated;
+                                continue :descent;
+                            },
+                            .eq => return Cursor{ .node = node, .index = @intCast(j) },
+                            .gt => accumulated += 1,
+                        }
+                        accumulated += weight;
+                    }
+                    unreachable;
+                }
+
+                assert(subtree_index < node.slots_in_use);
+                return Cursor{ .node = node, .index = @intCast(subtree_index) };
+            }
+        }
+
         fn shiftElement(slots: *[n]Element, begin: u32, end: u32, x: Element) void {
             mem.copyBackwards(Element, slots[begin + 1 .. end + 1], slots[begin..end]);
             slots[begin] = x;
@@ -405,13 +452,37 @@ pub fn BTree(comptime config: Config) type {
             var i = parent.header.slots_in_use;
             while (i >= index + 1) : (i -= 1) {
                 reparent(parent.children[i - 1].?, parent, i);
+                if (order_statistics) parent.weights[i] = parent.weights[i - 1];
             }
             reparent(child, parent, index);
+            updateWeightsUpwards(child, 1);
         }
 
         fn unshiftChild(parent: *InternalNode, index: u32) void {
             for (index..parent.header.slots_in_use) |i| {
                 reparent(parent.children[i + 1].?, parent, @intCast(i));
+                if (order_statistics) parent.weights[i] = parent.weights[i + 1];
+            }
+        }
+
+        fn updateWeightsUpwards(starting_node: NodeHandle, max_climb: usize) void {
+            if (order_statistics) {
+                var node = starting_node;
+                var iterations = max_climb;
+                while (node.parent != null and iterations > 0) {
+                    const parent = node.parent.?;
+
+                    var node_weight: usize = node.slots_in_use;
+                    if (node.asInternal()) |branch| {
+                        for (0..node.slots_in_use + 1) |i| {
+                            node_weight += branch.weights[i];
+                        }
+                    }
+                    parent.weights[node.index_in_parent] = node_weight;
+
+                    node = parent.handle();
+                    iterations -= 1;
+                }
             }
         }
 
@@ -479,6 +550,7 @@ pub fn BTree(comptime config: Config) type {
                 shiftElement(&leaf.slots, start.index, leaf.header.slots_in_use, element);
                 leaf.header.slots_in_use += 1;
                 tree.total_in_use += 1;
+                updateWeightsUpwards(leaf.handle(), math.maxInt(usize));
                 return .{ .node = leaf.handle(), .index = start.index };
             }
 
@@ -499,6 +571,7 @@ pub fn BTree(comptime config: Config) type {
             const median_index = leaf.header.slots_in_use - 1;
             var median = leaf.slots[median_index];
             leaf.header.slots_in_use -= 1;
+            updateWeightsUpwards(node, 1);
             var child_cursor = leaf_cursor;
             const inserted_at_median = (child_cursor.node == node and child_cursor.index == median_index);
             var return_child_cursor = !inserted_at_median;
@@ -510,6 +583,7 @@ pub fn BTree(comptime config: Config) type {
                     shiftElement(&parent.slots, index, parent.header.slots_in_use, median);
                     parent.header.slots_in_use += 1;
                     shiftChild(parent, index + 1, new_sibling);
+                    updateWeightsUpwards(parent.handle(), math.maxInt(usize));
                     const parent_cursor = Cursor{ .node = parent.handle(), .index = index };
                     return if (return_child_cursor) child_cursor else parent_cursor;
                 }
@@ -525,6 +599,7 @@ pub fn BTree(comptime config: Config) type {
                 const new_median_index = parent.header.slots_in_use - 1;
                 median = parent.slots[new_median_index];
                 parent.header.slots_in_use -= 1;
+                updateWeightsUpwards(node, 1);
                 child_cursor = if (return_child_cursor) child_cursor else parent_cursor;
                 const inserted_at_new_median = (parent_cursor.node == node and parent_cursor.index == new_median_index);
                 return_child_cursor = (return_child_cursor or !inserted_at_new_median);
@@ -539,7 +614,9 @@ pub fn BTree(comptime config: Config) type {
             new_root.header.slots_in_use = 1;
             new_root.slots[0] = median;
             reparent(node, new_root, 0);
+            updateWeightsUpwards(node, 1);
             reparent(new_sibling, new_root, 1);
+            updateWeightsUpwards(new_sibling, 1);
             tree.root_handle = new_root.handle();
             const root_cursor = Cursor{ .node = new_root.handle(), .index = 0 };
             return if (return_child_cursor) child_cursor else root_cursor;
@@ -566,7 +643,10 @@ pub fn BTree(comptime config: Config) type {
                 // for an insertion in the left node, set up the right node first
                 for (mid..slots_per_node) |i| {
                     right.slots[i - mid] = left.slots[i];
-                    if (is_branch) reparent(left.children[i + 1].?, right, @intCast(i - mid + 1));
+                    if (is_branch) {
+                        reparent(left.children[i + 1].?, right, @intCast(i - mid + 1));
+                        if (order_statistics) right.weights[i - mid + 1] = left.weights[i + 1];
+                    }
                 }
                 right.header.slots_in_use = slots_per_node - mid;
                 // then do a normal insert on the left node
@@ -580,16 +660,25 @@ pub fn BTree(comptime config: Config) type {
                 var to: u32 = 0;
                 for (mid + 1..pos) |i| {
                     right.slots[to] = left.slots[i];
-                    if (is_branch) reparent(left.children[i + 1].?, right, to + 1);
+                    if (is_branch) {
+                        reparent(left.children[i + 1].?, right, to + 1);
+                        if (order_statistics) right.weights[to + 1] = left.weights[i + 1];
+                    }
                     to += 1;
                 }
                 right.slots[to] = key;
-                if (is_branch) reparent(child, right, to + 1);
+                if (is_branch) {
+                    reparent(child, right, to + 1);
+                    updateWeightsUpwards(child, 1);
+                }
                 cursor = .{ .node = right.handle(), .index = to };
                 to += 1;
                 for (pos..slots_per_node) |i| {
                     right.slots[to] = left.slots[i];
-                    if (is_branch) reparent(left.children[i + 1].?, right, to + 1);
+                    if (is_branch) {
+                        reparent(left.children[i + 1].?, right, to + 1);
+                        if (order_statistics) right.weights[to + 1] = left.weights[i + 1];
+                    }
                     to += 1;
                 }
                 // then simply adjust slot use counts
@@ -605,6 +694,7 @@ pub fn BTree(comptime config: Config) type {
             if (is_branch) {
                 assert(right.children[0] == null);
                 reparent(left.children[left.header.slots_in_use].?, right, 0);
+                if (order_statistics) right.weights[0] = left.weights[left.header.slots_in_use];
             }
 
             return cursor;
@@ -620,8 +710,8 @@ pub fn BTree(comptime config: Config) type {
             if (node.asExternal()) |leaf| {
                 allocator.destroy(leaf);
             } else if (node.asInternal()) |branch| {
-                for (branch.children[0 .. @as(u32, branch.header.slots_in_use) + 1]) |child| {
-                    deallocate(allocator, child.?);
+                for (0..branch.header.slots_in_use + 1) |child_index| {
+                    deallocate(allocator, branch.children[child_index].?);
                 }
                 allocator.destroy(branch);
             } else {
@@ -647,13 +737,20 @@ pub fn BTree(comptime config: Config) type {
             unshiftElement(&leaf.slots, cursor.index, leaf.header.slots_in_use);
             leaf.header.slots_in_use -= 1;
             tree.total_in_use -= 1;
-            if (leaf.header.slots_in_use >= 1) return;
+            if (leaf.header.slots_in_use >= 1) {
+                updateWeightsUpwards(leaf.handle(), math.maxInt(usize));
+                return;
+            }
 
             // start rebalancing bottom-up while there are overflows (merge-at-half)
             leaf = rebalanceLeaf(tree, allocator, leaf);
             var node = leaf.header.parent;
             while (node) |branch| {
-                if (branch.header.slots_in_use >= slots_per_node / 2) break;
+                if (branch.header.slots_in_use >= slots_per_node / 2) {
+                    updateWeightsUpwards(branch.handle(), math.maxInt(usize));
+                    break;
+                }
+                updateWeightsUpwards(branch.handle(), 1);
                 const possiblyMerged = rebalanceBranch(tree, allocator, branch);
                 node = possiblyMerged.header.parent;
             }
@@ -696,6 +793,7 @@ pub fn BTree(comptime config: Config) type {
                 const separator_index = child_index;
                 node.slots[node.header.slots_in_use] = parent.slots[separator_index];
                 node.header.slots_in_use += 1;
+                updateWeightsUpwards(node.handle(), 1);
                 parent.slots[separator_index] = right.slots[0];
                 unshiftElement(&right.slots, 0, right.header.slots_in_use);
                 if (is_branch) {
@@ -704,16 +802,19 @@ pub fn BTree(comptime config: Config) type {
                     shiftChild(node, node.header.slots_in_use, sparePointer);
                 }
                 right.header.slots_in_use -= 1;
+                updateWeightsUpwards(right.handle(), 1);
                 return node;
             } else if (existsAndHasSpare(Node, left_sibling)) |left| { // clockwise rotation
                 const separator_index = child_index - 1;
                 shiftElement(&node.slots, 0, node.header.slots_in_use, parent.slots[separator_index]);
                 node.header.slots_in_use += 1;
+                updateWeightsUpwards(node.handle(), 1);
                 parent.slots[separator_index] = left.slots[left.header.slots_in_use - 1];
                 if (is_branch) {
                     shiftChild(node, 0, left.children[left.header.slots_in_use].?);
                 }
                 left.header.slots_in_use -= 1;
+                updateWeightsUpwards(left.handle(), 1);
                 return node;
             } else { // merge two sibling nodes and delete the rightmost
                 var left: *Node = undefined;
@@ -745,6 +846,7 @@ pub fn BTree(comptime config: Config) type {
                 if (is_branch) {
                     for (0..right.header.slots_in_use + 1) |i| {
                         reparent(right.children[i].?, left, @intCast(left.header.slots_in_use + i));
+                        if (order_statistics) left.weights[left.header.slots_in_use + i] = right.weights[i];
                     }
                 }
                 left.header.slots_in_use += right.header.slots_in_use;
@@ -758,6 +860,7 @@ pub fn BTree(comptime config: Config) type {
                     tree.root_handle.?.parent = null;
                 }
 
+                updateWeightsUpwards(left.handle(), 1);
                 return left;
             }
         }
@@ -775,8 +878,8 @@ test "BTree: ordered set using AutoContext" {
     inline for ([_]bool{ true, false }) |bsearch| {
         const B3 = BTree(.{ .Element = i32, .slots_per_node = 3, .use_binary_search = bsearch });
 
-        const alloc = testing.allocator;
         const ctx = AutoContext(i32){};
+        const alloc = testing.allocator;
         var set = B3{};
         const payload = [_]i32{
             34, 33, 38,
@@ -908,6 +1011,36 @@ test "BTree: ordered multiset with adapted lookup context" {
     try testing.expectEqual(payload.len - 2, multiset.len());
 }
 
+test "BTree: counted / order statistic tree operations" {
+    const B3 = BTree(.{ .Element = u8, .slots_per_node = 3, .order_statistics = true });
+    const ctx = AutoContext(u8){};
+    const alloc = testing.allocator;
+    var sorted = B3{};
+    defer sorted.clear(alloc);
+
+    // out of order insertions
+    const payload = [_]u8{
+        'Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P', 'O', 'N',
+        'M', 'L', 'K', 'J', 'I', 'H', 'G', 'F', 'E', 'D', 'C', 'B', 'A',
+    };
+    try testing.expectEqual(@as(usize, 0), sorted.len());
+    for (payload) |element| {
+        const lookup = sorted.lookup(element, ctx);
+        const cursor = try sorted.insert(alloc, lookup, element, ctx);
+        try testing.expectEqual(element, cursor.get().*);
+    }
+    try testing.expectEqual(payload.len, sorted.len());
+
+    // testing by-rank selection
+    for (0..payload.len) |rank| {
+        const element = payload[payload.len - 1 - rank];
+        const cursor = sorted.select(rank) orelse return error.RankNotFound;
+        try testing.expectEqual(element, cursor.get().*);
+    }
+    // out-of-bounds case
+    try testing.expect(sorted.select(payload.len) == null);
+}
+
 // same structure as an actual BTree, but with the wrong type of parent ptr
 const NodeHeaderTemplate = packed struct {
     is_internal: bool,
@@ -919,17 +1052,26 @@ comptime {
     assert(@sizeOf(NodeHeaderTemplate) == 4 + 4 + @sizeOf(*anyopaque));
 }
 
-fn defaultSlotsPerNode(comptime Element: type, comptime slots_alignment: usize) usize {
+fn defaultSlotsPerNode(
+    comptime Element: type,
+    comptime slots_alignment: usize,
+    comptime order_statistics: bool,
+) usize {
     const bytes = 4 * cache_line; // <- chosen empirically
-    return maxSlotsPerNode(Element, slots_alignment, bytes);
+    return maxSlotsPerNode(Element, slots_alignment, bytes, order_statistics);
 }
 
-fn maxSlotsPerNode(comptime Element: type, comptime slots_alignment: usize, comptime max_bytes: usize) usize {
+fn maxSlotsPerNode(
+    comptime Element: type,
+    comptime slots_alignment: usize,
+    comptime max_bytes: usize,
+    comptime order_statistics: bool,
+) usize {
     var begin: usize = 2;
-    var end: usize = max_bytes;
+    var end: usize = max_bytes / (@sizeOf(Element) + @sizeOf(*anyopaque));
     while (begin < end) {
         const n = begin + (end - begin) / 2;
-        const bytes = @sizeOf(InternalNodeTemplate(Element, slots_alignment, n));
+        const bytes = @sizeOf(InternalNodeTemplate(Element, slots_alignment, n, order_statistics));
         switch (math.order(bytes, max_bytes)) {
             .gt => end = n,
             .lt => begin = n,
@@ -939,10 +1081,16 @@ fn maxSlotsPerNode(comptime Element: type, comptime slots_alignment: usize, comp
     return begin;
 }
 
-fn InternalNodeTemplate(comptime Element: type, comptime slots_alignment: usize, comptime n: usize) type {
+fn InternalNodeTemplate(
+    comptime Element: type,
+    comptime slots_alignment: usize,
+    comptime n: usize,
+    comptime order_statistics: bool,
+) type {
     return extern struct {
         header: NodeHeaderTemplate align(cache_line),
         children: [n + 1]?*NodeHeaderTemplate,
+        weights: (if (order_statistics) [n + 1]usize else void),
         slots: [n]Element align(slots_alignment),
     };
 }

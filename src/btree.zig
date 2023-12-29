@@ -54,12 +54,10 @@ pub const Config = struct {
     bytes_per_node: ?usize = null,
 
     /// If true, the B-tree will track the weight of its subtrees, enabling
-    /// [order statistic](https://en.wikipedia.org/wiki/Order_statistic_tree) operations.
+    /// [order statistic](https://en.wikipedia.org/wiki/Order_statistic_tree) operations `select` and `rank`.
     ///
     /// Since this increases the memory overhead of branch nodes and leads to extra writes
     /// on tree updates, it is disabled by default.
-    ///
-    /// TODO: link to ops
     order_statistics: bool = false,
 
     /// Overrides the default alignment of the array field containing each node's elements.
@@ -399,14 +397,51 @@ pub fn BTree(comptime config: Config) type {
             return if (search.found) .{ .found = cursor } else .{ .not_found = cursor };
         }
 
-        // TODO: docs
-        pub fn select(tree: Tree, rank: usize) ?Cursor {
+        /// Order statistics: identifies the (zero-based) rank of an element in the tree, if present.
+        ///
+        /// Returns a struct with the index this element would have in a sorted sequence containing
+        /// this tree's elements. The struct also indicates whether the element was actually found.
+        ///
+        /// This functions's treatment of (pseudo-)keys, ordering contexts and duplicate elements
+        /// is the same as in `lookup`.
+        pub fn rank(tree: Tree, key: anytype, context: anytype) struct { index: usize, found: bool } {
+            if (!order_statistics) {
+                @compileError("`rank` operation requires `order_statistics`");
+            } else {
+                var node = tree.root_handle orelse return .{ .index = 0, .found = false };
+                var index: usize = 0;
+
+                descent: while (node.asInternal()) |branch| {
+                    for (0..branch.header.slots_in_use) |j| {
+                        const weight = branch.weights[j];
+                        switch (context.cmp(key, branch.slots[j])) {
+                            .lt => {
+                                node = branch.children[j].?;
+                                continue :descent;
+                            },
+                            .eq => return .{ .index = index + weight, .found = true },
+                            .gt => index += weight + 1,
+                        }
+                    }
+                    node = branch.children[branch.header.slots_in_use].?;
+                }
+
+                const leaf = node.asExternal().?;
+                const search = bisect(key, &leaf.slots, leaf.header.slots_in_use, context);
+                return .{ .index = index + search.index, .found = search.found };
+            }
+        }
+
+        /// Order statistics: looks up the N-th smallest element in the tree, where N is a zero-based index.
+        ///
+        /// Returns a cursor to the requested element, or null if the index is out of bounds.
+        pub fn select(tree: Tree, index: usize) ?Cursor {
             if (!order_statistics) {
                 @compileError("`select` operation requires `order_statistics`");
             } else {
-                if (rank >= tree.len()) return null;
+                if (index >= tree.len()) return null;
 
-                var subtree_index = rank;
+                var subtree_index = index;
                 var node = tree.root_handle.?;
 
                 descent: while (node.asInternal()) |branch| {
@@ -421,9 +456,8 @@ pub fn BTree(comptime config: Config) type {
                                 continue :descent;
                             },
                             .eq => return Cursor{ .node = node, .index = @intCast(j) },
-                            .gt => accumulated += 1,
+                            .gt => accumulated += weight + 1,
                         }
-                        accumulated += weight;
                     }
                     unreachable;
                 }
@@ -1031,13 +1065,15 @@ test "BTree: counted / order statistic tree operations" {
     }
     try testing.expectEqual(payload.len, sorted.len());
 
-    // testing by-rank selection
-    for (0..payload.len) |rank| {
-        const element = payload[payload.len - 1 - rank];
-        const cursor = sorted.select(rank) orelse return error.RankNotFound;
+    // testing rank query followed by indexing
+    for (payload) |element| {
+        const rank = sorted.rank(element, ctx);
+        const cursor = sorted.select(rank.index) orelse return error.RankNotFound;
         try testing.expectEqual(element, cursor.get().*);
     }
-    // out-of-bounds case
+
+    // out-of-bounds cases
+    try testing.expectEqual(false, sorted.rank('z', ctx).found);
     try testing.expect(sorted.select(payload.len) == null);
 }
 

@@ -4,10 +4,12 @@ const std = @import("std");
 
 pub const btree = @import("btree.zig");
 pub const math = @import("math.zig");
+pub const blist = @import("blist.zig");
 
 test {
     std.testing.refAllDecls(btree);
     std.testing.refAllDecls(math);
+    std.testing.refAllDecls(blist);
 }
 
 const Allocator = std.mem.Allocator;

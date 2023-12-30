@@ -734,6 +734,52 @@ pub fn BTree(comptime config: Config) type {
             return cursor;
         }
 
+        /// Order statistics: inserts an element without checking its ordering in the tree.
+        ///
+        /// The position parameter, obtained by a a `select(i)` operation, specifies the
+        /// zero-based index where the element will be inserted in the tree's sequence.
+        /// In the case of an out of bounds index, this will correspond to an append.
+        ///
+        /// Success and failure conditions work just like in `insert`.
+        pub fn insertUnsorted(
+            tree: *Tree,
+            allocator: Allocator,
+            position: ?Cursor,
+            element: Element,
+        ) InsertError!Cursor {
+            if (!order_statistics) {
+                @compileError("`insertUnsorted` operation requires `order_statistics`");
+            } else {
+                var insertPosition: LookupResult = blk: {
+                    if (position) |cursor| {
+                        if (!cursor.node.is_internal) {
+                            break :blk .{ .found = cursor };
+                        } else {
+                            var prevCursor = cursor;
+                            _ = prevCursor.prev().?;
+                            assert(!prevCursor.node.is_internal);
+                            break :blk .{ .found = prevCursor };
+                        }
+                    } else if (tree.max()) |cursor| {
+                        assert(!cursor.node.is_internal);
+                        var pastTheEndCursor = cursor;
+                        pastTheEndCursor.index += 1;
+                        break :blk .{ .not_found = pastTheEndCursor };
+                    } else {
+                        break :blk .{ .not_found = null };
+                    }
+                };
+
+                const UnreachableContext = struct {
+                    fn cmp(_: @This(), _: Element, _: Element) math.Order {
+                        unreachable;
+                    }
+                };
+
+                return tree.insert(allocator, insertPosition, element, UnreachableContext{});
+            }
+        }
+
         /// Deallocates all nodes in the tree, using stack space proportional to its height.
         pub fn clear(tree: *Tree, allocator: Allocator) void {
             if (tree.root_handle) |r| deallocate(allocator, r);
@@ -1045,25 +1091,27 @@ test "BTree: ordered multiset with adapted lookup context" {
     try testing.expectEqual(payload.len - 2, multiset.len());
 }
 
-test "BTree: counted / order statistic tree operations" {
+test "BTree: counted B-tree with order statistic operations" {
     const B3 = BTree(.{ .Element = u8, .slots_per_node = 3, .order_statistics = true });
-    const ctx = AutoContext(u8){};
     const alloc = testing.allocator;
     var sorted = B3{};
     defer sorted.clear(alloc);
 
-    // out of order insertions
+    // since we're doing indexed inserts, the payload needs to be sorted
     const payload = [_]u8{
-        'Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P', 'O', 'N',
-        'M', 'L', 'K', 'J', 'I', 'H', 'G', 'F', 'E', 'D', 'C', 'B', 'A',
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+        'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
     };
     try testing.expectEqual(@as(usize, 0), sorted.len());
-    for (payload) |element| {
-        const lookup = sorted.lookup(element, ctx);
-        const cursor = try sorted.insert(alloc, lookup, element, ctx);
+    for (0..payload.len) |index| {
+        const element = payload[index];
+        const cursor = try sorted.insertUnsorted(alloc, null, element);
         try testing.expectEqual(element, cursor.get().*);
     }
     try testing.expectEqual(payload.len, sorted.len());
+
+    // only needed to test rank
+    const ctx = AutoContext(u8){};
 
     // testing rank query followed by indexing
     for (payload) |element| {
@@ -1072,9 +1120,11 @@ test "BTree: counted / order statistic tree operations" {
         try testing.expectEqual(element, cursor.get().*);
     }
 
-    // out-of-bounds cases
-    try testing.expectEqual(false, sorted.rank('z', ctx).found);
-    try testing.expect(sorted.select(payload.len) == null);
+    // out-of-bounds cases after deletion
+    const cx = sorted.select(13);
+    sorted.delete(alloc, cx.?);
+    try testing.expect(!sorted.rank('N', ctx).found);
+    try testing.expect(sorted.select(payload.len - 1) == null);
 }
 
 // same structure as an actual BTree, but with the wrong type of parent ptr
